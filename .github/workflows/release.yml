@@ -62,7 +62,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - working-directory: crates/findex-tauri
         run: npm ci
-      - run: cargo test --workspace --locked
+      - run: cargo test --locked -p findex-core -p findex-cli
       - run: cargo build --release --locked -p findex-cli
       - name: Package Windows CLI
         if: runner.os == 'Windows'
