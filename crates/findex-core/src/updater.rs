@@ -462,11 +462,7 @@ mod tests {
         let signature =
             decode_signature(include_str!("../tests/fixtures/updater_payload.txt.sig")).unwrap();
         public_key
-            .verify(
-                include_bytes!("../tests/fixtures/updater_payload.txt"),
-                &signature,
-                false,
-            )
+            .verify(b"findex updater signature fixture v1\n", &signature, false)
             .unwrap();
     }
 }
