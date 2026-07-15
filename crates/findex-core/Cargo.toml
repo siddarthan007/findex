@@ -82,7 +82,8 @@ lang-php = ["dep:tree-sitter-php"]
 lang-swift = ["dep:tree-sitter-swift"]
 lang-major = ["lang-csharp", "lang-ruby", "lang-php", "lang-swift"]
 # Precise cross-file name resolution via github/stack-graphs. Brings in the
-# tree-sitter-stack-graphs crate and language definitions for Python & TS.
+# tree-sitter-stack-graphs crate and Python, JavaScript, TypeScript, and Java
+# language definitions.
 stack-graphs = [
     "dep:tree-sitter-stack-graphs",
     "dep:stack-graphs",
