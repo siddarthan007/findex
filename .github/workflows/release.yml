@@ -104,7 +104,7 @@ jobs:
       - name: Build CLI update manifest
         shell: pwsh
         run: ./scripts/build_cli_manifest.ps1 -Version '${{ github.ref_name }}' -Repository '${{ github.repository }}' -ArtifactsDir dist -Output dist/latest-cli.json
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           draft: true
           generate_release_notes: true
@@ -135,13 +135,13 @@ jobs:
         run: npm ci
       - name: Build desktop bundles
         if: github.event_name == 'workflow_dispatch'
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         with:
           projectPath: crates/findex-tauri
           args: --config tauri.updater.conf.json
       - name: Build and attach tagged desktop release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
