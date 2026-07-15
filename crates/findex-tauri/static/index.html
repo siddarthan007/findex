@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Findex</title>
+  <style>
+    /* ---- Design tokens ----
+       Monochrome ink-on-paper dark scheme. One accent. No gradients.
+       Ratios tuned for long sessions of reading code structure. */
+    :root {
+      --bg:        #0b0d10;
+      --surface:   #111418;
+      --surface-2: #161a1f;
+      --border:    #1e2329;
+      --border-2:  #262d35;
+      --text:      #d4d8de;
+      --text-dim:  #7a8290;
+      --text-faint:#4a525c;
+      --accent:    #c8a25a;
+      --accent-dim:#6e5a30;
+      --danger:    #b5635a;
+      --mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --radius: 3px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 13px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+    button { font: inherit; color: inherit; cursor: pointer; }
+
+    /* ---- App shell ---- */
+    #app { display: grid; grid-template-rows: auto 1fr auto; height: 100vh; }
+
+    /* ---- Top bar ---- */
+    header {
+      display: flex; align-items: center; gap: 0;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      padding: 0 14px;
+      height: 40px;
+    }
+    .brand {
+      font-family: var(--mono);
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      font-size: 12px;
+      color: var(--text);
+      padding-right: 16px;
+      border-right: 1px solid var(--border);
+      margin-right: 16px;
+      height: 100%;
+      display: flex; align-items: center;
+    }
+    .brand .dot { color: var(--accent); margin-left: 2px; }
+    .tabs { display: flex; gap: 0; height: 100%; }
+    .tab {
+      background: none; border: none;
+      padding: 0 14px;
+      color: var(--text-dim);
+      font-size: 12px;
+      border-bottom: 2px solid transparent;
+      transition: color .12s, border-color .12s;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+    .spacer { flex: 1; }
+    .meta {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-faint);
+    }
+
+    /* ---- Main ---- */
+    main { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+    .panel { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+    .panel-left { border-right: 1px solid var(--border); }
+
+    /* ---- Graph canvas ---- */
+    #graph { flex: 1; min-height: 0; }
+    .panel-overlay {
+      position: relative;
+    }
+    .graph-legend {
+      position: absolute; bottom: 12px; left: 12px;
+      background: rgba(11,13,16,.78);
+      border: 1px solid var(--border-2);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text-dim);
+      line-height: 1.7;
+      pointer-events: none;
+    }
+    .graph-legend .row { display: flex; align-items: center; gap: 6px; }
+    .swatch { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+    /* ---- Sidebar ---- */
+    aside { display: grid; grid-template-rows: auto 1fr auto; min-height: 0; background: var(--surface); }
+    .search-box { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+    .search-box input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border-2);
+      border-radius: var(--radius);
+      color: var(--text);
+      padding: 7px 10px;
+      font-family: var(--mono);
+      font-size: 12px;
+      outline: none;
+    }
+    .search-box input:focus { border-color: var(--accent-dim); }
+    .search-box input::placeholder { color: var(--text-faint); }
+    .icon-btn {
+      background: var(--surface-2);
+      border: 1px solid var(--border-2);
+      border-radius: var(--radius);
+      padding: 0 10px;
+      color: var(--text-dim);
+      font-size: 11px;
+      font-family: var(--mono);
+    }
+    .icon-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+
+    .results { overflow-y: auto; }
+    .result {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+    }
+    .result:hover { background: var(--surface-2); }
+    .result.selected { background: var(--surface-2); border-left: 2px solid var(--accent); padding-left: 10px; }
+    .result .r-kind {
+      font-family: var(--mono); font-size: 10px;
+      color: var(--accent); text-transform: uppercase; letter-spacing: .06em;
+    }
+    .result .r-name { font-family: var(--mono); font-size: 12px; color: var(--text); margin-top: 1px; }
+    .result .r-loc { font-family: var(--mono); font-size: 10px; color: var(--text-faint); margin-top: 1px; }
+
+    .detail { border-top: 1px solid var(--border); padding: 12px; min-height: 0; }
+    .detail h3 {
+      margin: 0 0 8px 0;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text);
+      font-weight: 600;
+    }
+    .detail .row { display: grid; grid-template-columns: 64px 1fr; gap: 6px; margin-bottom: 4px; }
+    .detail .k { color: var(--text-faint); font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+    .detail .v { color: var(--text); font-family: var(--mono); font-size: 11px; word-break: break-all; }
+    .detail pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px;
+      margin: 8px 0 0 0;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text-dim);
+      max-height: 200px;
+      overflow: auto;
+      white-space: pre-wrap;
+    }
+    .empty { color: var(--text-faint); font-family: var(--mono); font-size: 11px; padding: 16px 12px; }
+
+    /* ---- Footer ---- */
+    footer {
+      border-top: 1px solid var(--border);
+      background: var(--surface);
+      height: 26px;
+      display: flex; align-items: center;
+      padding: 0 14px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--text-faint);
+      gap: 16px;
+    }
+    footer .pill { color: var(--text-dim); }
+    footer .pill b { color: var(--text); font-weight: 600; }
+    .kbd {
+      display: inline-block;
+      padding: 0 4px;
+      border: 1px solid var(--border-2);
+      border-radius: 2px;
+      color: var(--text-dim);
+      font-size: 9px;
+      margin: 0 2px;
+    }
+
+    /* ---- Scrollbars ---- */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+    /* ---- Command palette ---- */
+    .palette-backdrop {
+      position: fixed; inset: 0; background: rgba(11,13,16,.6);
+      display: none; align-items: flex-start; justify-content: center; padding-top: 12vh;
+      z-index: 50;
+    }
+    .palette-backdrop.open { display: flex; }
+    .palette {
+      width: 460px; max-width: 92vw;
+      background: var(--surface-2);
+      border: 1px solid var(--border-2);
+      border-radius: var(--radius);
+      box-shadow: 0 12px 40px rgba(0,0,0,.5);
+      overflow: hidden;
+    }
+    .palette input {
+      width: 100%; border: none; outline: none;
+      background: transparent; color: var(--text);
+      padding: 12px 14px;
+      font-family: var(--mono); font-size: 13px;
+      border-bottom: 1px solid var(--border);
+    }
+    .palette ul { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; }
+    .palette li {
+      padding: 8px 14px; cursor: pointer;
+      font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .palette li:hover, .palette li.active { background: var(--bg); color: var(--text); }
+    .palette li .hint { color: var(--text-faint); font-size: 10px; }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="brand">FINDEX<span class="dot">.</span></div>
+      <nav class="tabs">
+        <button class="tab active" data-view="graph">Graph</button>
+        <button class="tab" data-view="map">Repo Map</button>
+        <button class="tab" data-view="ast">AST</button>
+      </nav>
+      <div class="spacer"></div>
+      <div class="meta" id="db-meta">no index</div>
+    </header>
+
+    <main>
+      <section class="panel panel-left panel-overlay">
+        <div id="graph"></div>
+        <div class="graph-legend" id="legend"></div>
+        <div id="map-view" class="hidden" style="flex:1;overflow:auto;padding:14px;">
+          <pre id="map-pre" class="empty">No repo map generated yet. Press R or use the command palette.</pre>
+        </div>
+        <div id="ast-view" class="hidden" style="flex:1;overflow:auto;padding:14px;">
+          <pre id="ast-pre" class="empty">Select a symbol to inspect its AST neighborhood.</pre>
+        </div>
+      </section>
+
+      <aside>
+        <div class="search-box">
+          <input id="search" type="text" placeholder="search symbols" autocomplete="off" />
+          <button class="icon-btn" id="palette-btn" title="Command palette (/)">/</button>
+        </div>
+        <div class="results" id="results">
+          <div class="empty">Type to search the index.</div>
+        </div>
+        <div class="detail" id="detail">
+          <h3>Inspector</h3>
+          <div class="empty" id="detail-empty">Nothing selected.</div>
+        </div>
+      </aside>
+    </main>
+
+    <footer>
+      <span class="pill">symbols <b id="stat-sym">0</b></span>
+      <span class="pill">edges <b id="stat-edge">0</b></span>
+      <span class="pill">vectors <b id="stat-vec">0</b></span>
+      <div class="spacer" style="flex:1"></div>
+      <span><span class="kbd">/</span> palette &nbsp; <span class="kbd">R</span> repo map &nbsp; <span class="kbd">J</span><span class="kbd">K</span> navigate &nbsp; <span class="kbd">Q</span> quit</span>
+    </footer>
+  </div>
+
+  <!-- Command palette -->
+  <div class="palette-backdrop" id="palette">
+    <div class="palette">
+      <input id="palette-input" type="text" placeholder="commands and symbols" autocomplete="off" />
+      <ul id="palette-list"></ul>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/3d-force-graph"></script>
+  <script>
+    const { invoke } = window.__TAURI__.core;
+    const $ = (s) => document.querySelector(s);
+
+    const state = {
+      view: 'graph',
+      graph: null,
+      graphData: { nodes: [], links: [] },
+      results: [],
+      selectedIdx: -1,
+      paletteOpen: false,
+      paletteItems: [],
+      paletteIdx: 0,
+    };
+
+    const KIND_COLOR = {
+      god:      '#c8a25a',
+      Function: '#9bb2c7',
+      Method:   '#9bb2c7',
+      Class:    '#8fa68a',
+      Struct:   '#c4b27a',
+      Interface:'#6fa3a3',
+      Enum:     '#b08fb0',
+      other:    '#5a6270',
+    };
+    function colorFor(kind, isGod) {
+      if (isGod) return KIND_COLOR.god;
+      return KIND_COLOR[kind] || KIND_COLOR.other;
+    }
+
+    function renderLegend() {
+      const rows = [
+        ['god', 'highly referenced'],
+        ['Function', 'function / method'],
+        ['Class', 'class'],
+        ['Struct', 'struct'],
+        ['Interface', 'interface'],
+        ['other', 'other'],
+      ];
+      $('#legend').innerHTML = rows.map(([k, label]) =>
+        `<div class="row"><span class="swatch" style="background:${KIND_COLOR[k]}"></span>${label}</div>`
+      ).join('');
+    }
+
+    function setView(v) {
+      state.view = v;
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
+      $('#graph').classList.toggle('hidden', v !== 'graph');
+      $('#legend').classList.toggle('hidden', v !== 'graph');
+      $('#map-view').classList.toggle('hidden', v !== 'map');
+      $('#ast-view').classList.toggle('hidden', v !== 'ast');
+      if (v === 'map' && !$('#map-pre').textContent.trim()) loadRepoMap();
+    }
+
+    document.querySelectorAll('.tab').forEach(t =>
+      t.addEventListener('click', () => setView(t.dataset.view)));
+
+    async function loadGraph() {
+      try {
+        const data = await invoke('get_graph_data');
+        const nodes = data.nodes.map(n => ({
+          ...n,
+          color: colorFor(n.kind, n.is_god),
+          val: n.weight || 3,
+        }));
+        const links = data.edges.map(e => ({
+          source: e.source, target: e.target, color: '#222a33',
+        }));
+        state.graphData = { nodes, links };
+        $('#stat-sym').textContent = nodes.length;
+        $('#stat-edge').textContent = links.length;
+        renderGraph();
+      } catch (e) { console.error(e); $('#db-meta').textContent = 'load failed'; }
+    }
+
+    async function loadStats() {
+      try {
+        const s = await invoke('get_stats');
+        $('#stat-vec').textContent = s.vectors;
+        $('#db-meta').textContent = `${s.symbols} symbols · ${s.edges} edges`;
+      } catch (e) { /* ignore */ }
+    }
+
+    function renderGraph() {
+      const elem = $('#graph');
+      if (!state.graph) {
+        state.graph = ForceGraph3D()(elem)
+          .backgroundColor('#0b0d10')
+          .nodeLabel(n => `<span style="font-family:monospace;font-size:11px;color:#d4d8de;background:#111418;padding:2px 6px;border:1px solid #262d35">${n.label}</span>`)
+          .nodeColor(n => n.color)
+          .nodeRelSize(3)
+          .nodeOpacity(0.95)
+          .linkColor(() => '#222a33')
+          .linkOpacity(0.35)
+          .linkDirectionalArrowLength(3)
+          .linkDirectionalArrowRelPos(1)
+          .linkDirectionalParticles(0)
+          .onNodeClick(n => showDetail(n));
+      }
+      state.graph.graphData(state.graphData);
+    }
+
+    async function doSearch(q) {
+      if (!q || !q.trim()) { state.results = []; renderResults(); return; }
+      try {
+        const r = await invoke('search_symbols', { query: q, limit: 50 });
+        state.results = r;
+        state.selectedIdx = r.length ? 0 : -1;
+        renderResults();
+      } catch (e) { console.error(e); }
+    }
+
+    function renderResults() {
+      const box = $('#results');
+      if (!state.results.length) {
+        box.innerHTML = '<div class="empty">No results.</div>';
+        return;
+      }
+      box.innerHTML = state.results.map((s, i) => `
+        <div class="result ${i === state.selectedIdx ? 'selected' : ''}" data-idx="${i}">
+          <div class="r-kind">${s.kind}</div>
+          <div class="r-name">${escapeHtml(s.name)}</div>
+          <div class="r-loc">${escapeHtml(s.file_path)}:${s.start_line}-${s.end_line}</div>
+        </div>`).join('');
+      box.querySelectorAll('.result').forEach(el => {
+        el.addEventListener('click', () => {
+          state.selectedIdx = parseInt(el.dataset.idx);
+          renderResults();
+          showDetail(resultToNode(state.results[state.selectedIdx]));
+        });
+      });
+    }
+
+    function resultToNode(s) {
+      return { id: s.id, label: s.name, kind: s.kind, file_path: s.file_path,
+               start_line: s.start_line, end_line: s.end_line, signature: s.signature };
+    }
+
+    async function showDetail(n) {
+      if (!n) return;
+      const html = `
+        <h3>${escapeHtml(n.label)}</h3>
+        <div class="row"><div class="k">Kind</div><div class="v">${n.kind}</div></div>
+        <div class="row"><div class="k">File</div><div class="v">${escapeHtml(n.file_path)}</div></div>
+        <div class="row"><div class="k">Lines</div><div class="v">${n.start_line}-${n.end_line}</div></div>
+        ${n.signature ? `<div class="row"><div class="k">Sig</div><div class="v">${escapeHtml(n.signature)}</div></div>` : ''}
+        <pre id="detail-skeleton">loading…</pre>`;
+      $('#detail').innerHTML = html;
+      try {
+        const skel = await invoke('get_file_skeleton_cmd', { path: n.file_path, tokenBudget: 512 });
+        $('#detail-skeleton').textContent = skel;
+      } catch (e) { $('#detail-skeleton').textContent = ''; }
+      if (state.view === 'ast') loadAst(n);
+    }
+
+    async function loadAst(n) {
+      $('#ast-pre').classList.remove('empty');
+      $('#ast-pre').textContent = 'loading…';
+      try {
+        const data = await invoke('get_symbol_neighborhood', { symbolId: n.id, depth: 1 });
+        const lines = [];
+        lines.push(`# neighborhood of ${n.label} (depth=1)`);
+        lines.push('');
+        lines.push('callers:');
+        data.callers.forEach(c => lines.push(`  ${c.kind} ${c.name}  ${c.file_path}:${c.start_line}`));
+        lines.push('');
+        lines.push('callees:');
+        data.callees.forEach(c => lines.push(`  ${c.kind} ${c.name}  ${c.file_path}:${c.start_line}`));
+        lines.push('');
+        lines.push('contains:');
+        data.contains.forEach(c => lines.push(`  ${c.kind} ${c.name}  ${c.file_path}:${c.start_line}`));
+        $('#ast-pre').textContent = lines.join('\n');
+      } catch (e) { $('#ast-pre').textContent = String(e); }
+    }
+
+    async function loadRepoMap() {
+      $('#map-pre').classList.remove('empty');
+      $('#map-pre').textContent = 'generating…';
+      try {
+        const map = await invoke('get_repo_map', { tokenBudget: 1024 });
+        $('#map-pre').textContent = map;
+      } catch (e) { $('#map-pre').textContent = String(e); }
+    }
+
+    async function reindex() {
+      const root = prompt('Root directory to index:', '.');
+      if (!root) return;
+      $('#db-meta').textContent = 'indexing…';
+      try {
+        const r = await invoke('reindex', { root });
+        alert(r);
+        await loadGraph(); await loadStats();
+      } catch (e) { alert('Reindex failed: ' + e); }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    /* ---- Search input ---- */
+    const searchInput = $('#search');
+    let searchTimer = null;
+    searchInput.addEventListener('input', () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => doSearch(searchInput.value), 140);
+    });
+
+    /* ---- Command palette ---- */
+    const COMMANDS = [
+      { id: 'reindex', label: 'Reindex directory', hint: 'cmd', run: reindex },
+      { id: 'map', label: 'Show repo map', hint: 'view', run: () => setView('map') },
+      { id: 'graph', label: 'Show graph', hint: 'view', run: () => setView('graph') },
+      { id: 'ast', label: 'Show AST neighborhood', hint: 'view', run: () => setView('ast') },
+    ];
+
+    function openPalette() {
+      state.paletteOpen = true;
+      $('#palette').classList.add('open');
+      $('#palette-input').value = '';
+      $('#palette-input').focus();
+      updatePalette('');
+    }
+    function closePalette() {
+      state.paletteOpen = false;
+      $('#palette').classList.remove('open');
+    }
+    async function updatePalette(q) {
+      let items;
+      if (!q) {
+        items = COMMANDS.map(c => ({ type: 'cmd', ...c }));
+      } else {
+        const cmdMatches = COMMANDS.filter(c => c.label.toLowerCase().includes(q.toLowerCase()));
+        items = cmdMatches.map(c => ({ type: 'cmd', ...c }));
+        try {
+          const symMatches = await invoke('search_symbols', { query: q, limit: 8 });
+          items = items.concat(symMatches.map(s => ({
+            type: 'sym', id: s.id, label: `${s.kind} ${s.name}`, hint: s.file_path, sym: s,
+          })));
+        } catch (e) {}
+      }
+      state.paletteItems = items;
+      state.paletteIdx = 0;
+      renderPalette();
+    }
+    function renderPalette() {
+      $('#palette-list').innerHTML = state.paletteItems.map((it, i) => `
+        <li class="${i === state.paletteIdx ? 'active' : ''}" data-idx="${i}">
+          <span>${escapeHtml(it.label)}</span><span class="hint">${escapeHtml(it.hint || '')}</span>
+        </li>`).join('');
+      $('#palette-list').querySelectorAll('li').forEach(li => {
+        li.addEventListener('click', () => runPaletteItem(parseInt(li.dataset.idx)));
+      });
+    }
+    function runPaletteItem(i) {
+      const it = state.paletteItems[i];
+      if (!it) return;
+      closePalette();
+      if (it.type === 'cmd') it.run();
+      else { showDetail(resultToNode(it.sym)); }
+    }
+    $('#palette-btn').addEventListener('click', openPalette);
+    $('#palette-input').addEventListener('input', e => updatePalette(e.target.value));
+    $('#palette-input').addEventListener('keydown', e => {
+      if (e.key === 'Escape') { closePalette(); searchInput.focus(); }
+      else if (e.key === 'ArrowDown') {
+        state.paletteIdx = Math.min(state.paletteIdx + 1, state.paletteItems.length - 1); renderPalette();
+      } else if (e.key === 'ArrowUp') {
+        state.paletteIdx = Math.max(state.paletteIdx - 1, 0); renderPalette();
+      } else if (e.key === 'Enter') runPaletteItem(state.paletteIdx);
+    });
+    $('#palette').addEventListener('click', e => { if (e.target.id === 'palette') closePalette(); });
+
+    /* ---- Global keys ---- */
+    document.addEventListener('keydown', e => {
+      if (state.paletteOpen) return;
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input') {
+        if (e.key === 'Escape') { e.target.blur(); }
+        return;
+      }
+      if (e.key === '/') { e.preventDefault(); openPalette(); }
+      else if (e.key.toLowerCase() === 'r') { setView('map'); loadRepoMap(); }
+      else if (e.key.toLowerCase() === 'g') { setView('graph'); }
+      else if (e.key.toLowerCase() === 'a') { setView('ast'); }
+      else if (e.key === 'j') {
+        if (state.results.length) {
+          state.selectedIdx = Math.min(state.selectedIdx + 1, state.results.length - 1);
+          renderResults();
+        }
+      } else if (e.key === 'k') {
+        if (state.results.length) {
+          state.selectedIdx = Math.max(state.selectedIdx - 1, 0);
+          renderResults();
+        }
+      } else if (e.key.toLowerCase() === 'q') {
+        // no clean quit hook in Tauri webview; blur instead
+        window.close && window.close();
+      }
+    });
+
+    /* ---- Boot ---- */
+    renderLegend();
+    loadGraph();
+    loadStats();
+  </script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+[package]
+name = "findex-tauri"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+findex-core = { path = "../findex-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2.10.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
+uuid = { workspace = true }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+default = []
+cuda = ["findex-core/cuda"]

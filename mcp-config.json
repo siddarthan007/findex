@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "findex": {
+      "command": "findex",
+      "args": ["--db-path", ".findex_db", "mcp"],
+      "env": {
+        "FINDEX_MODEL_POLICY": "auto",
+        "FINDEX_MODEL_PROFILE": "fast"
+      }
+    }
+  }
+}

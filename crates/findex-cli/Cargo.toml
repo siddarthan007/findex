@@ -1,0 +1,34 @@
+[package]
+name = "findex-cli"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+findex-core = { path = "../findex-core" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+tempfile = { workspace = true }
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+ratatui-textarea = "0.9.2"
+tui-tree-widget = "0.24.0"
+tui-overlay = "0.1.2"
+ratatui-toaster = "0.1.4"
+tachyonfx = "0.25.1"
+opaline = { version = "0.4.1", features = ["ratatui", "syntect"] }
+coolor = "1.1.0"
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+syntect = "5.3.0"
+tui-scrollview = "0.6.7"
+tui-big-text = "0.8.8"
+tui-logger = { version = "0.18.3", features = ["crossterm"] }
+tui-tabs = "0.1.1"
+log = "0.4.33"
+
+[features]
+default = []
+cuda = ["findex-core/cuda"]

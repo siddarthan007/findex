@@ -1,0 +1,96 @@
+[package]
+name = "findex-core"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+rayon = { workspace = true }
+ignore = { workspace = true }
+memmap2 = { workspace = true }
+blake3 = { workspace = true }
+sled = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+tree-sitter-python = { workspace = true }
+tree-sitter-html = { workspace = true }
+tree-sitter-css = { workspace = true }
+tree-sitter-dart = { workspace = true }
+tree-sitter-c = { workspace = true, optional = true }
+tree-sitter-cpp = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-java = { workspace = true, optional = true }
+tree-sitter-c-sharp = { workspace = true, optional = true }
+tree-sitter-ruby = { workspace = true, optional = true }
+tree-sitter-php = { workspace = true, optional = true }
+tree-sitter-swift = { workspace = true, optional = true }
+tree-sitter-stack-graphs = { workspace = true, optional = true }
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_semantic = { workspace = true }
+oxc_syntax = { workspace = true }
+anyhow = { workspace = true }
+tantivy = { workspace = true }
+usearch = { workspace = true }
+petgraph = { workspace = true }
+ort = { workspace = true }
+tokenizers = { workspace = true }
+ndarray = { workspace = true }
+notify-debouncer-mini = { workspace = true }
+notify = { workspace = true }
+streaming-iterator = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+sysinfo = { workspace = true }
+hf-hub = { workspace = true }
+reqwest = { workspace = true }
+semver = { workspace = true }
+minisign-verify = { workspace = true }
+zip = { workspace = true }
+self-replace = { workspace = true }
+tempfile = { workspace = true }
+stack-graphs = { workspace = true, optional = true }
+tree-sitter-stack-graphs-python = { workspace = true, optional = true }
+tree-sitter-stack-graphs-javascript = { workspace = true, optional = true }
+tree-sitter-stack-graphs-typescript = { workspace = true, optional = true }
+tree-sitter-stack-graphs-java = { workspace = true, optional = true }
+
+
+
+
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = ["lang-extra", "lang-major", "stack-graphs"]
+lang-c = ["dep:tree-sitter-c"]
+lang-cpp = ["dep:tree-sitter-cpp"]
+lang-go = ["dep:tree-sitter-go"]
+lang-java = ["dep:tree-sitter-java"]
+lang-extra = ["lang-c", "lang-cpp", "lang-go", "lang-java"]
+lang-csharp = ["dep:tree-sitter-c-sharp"]
+lang-ruby = ["dep:tree-sitter-ruby"]
+lang-php = ["dep:tree-sitter-php"]
+lang-swift = ["dep:tree-sitter-swift"]
+lang-major = ["lang-csharp", "lang-ruby", "lang-php", "lang-swift"]
+# Precise cross-file name resolution via github/stack-graphs. Brings in the
+# tree-sitter-stack-graphs crate and language definitions for Python & TS.
+stack-graphs = [
+    "dep:tree-sitter-stack-graphs",
+    "dep:stack-graphs",
+    "dep:tree-sitter-stack-graphs-python",
+    "dep:tree-sitter-stack-graphs-javascript",
+    "dep:tree-sitter-stack-graphs-typescript",
+    "dep:tree-sitter-stack-graphs-java",
+]
+# Compile ONNX Runtime's CUDA execution provider. Runtime availability is
+# auto-detected and always falls back to CPU.
+cuda = ["ort/cuda"]

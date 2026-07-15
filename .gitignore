@@ -1,0 +1,25 @@
+# Rust and JavaScript build outputs
+/target/
+/crates/findex-tauri/node_modules/
+/crates/findex-tauri/ui/dist/
+
+# Local indexes, models, and agent state
+/.findex_db/
+/.models/
+/.codex/
+/.agents/
+
+# Signing material and environment overrides
+*.key
+*.key.pub
+.env
+.env.*
+!.env.example
+
+# OS and editor state
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
