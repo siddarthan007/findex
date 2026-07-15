@@ -3,6 +3,7 @@
 //! The public key and manifest endpoint are compiled into release binaries.
 //! Local builds without `FINDEX_UPDATER_PUBLIC_KEY` remain network-silent.
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use minisign_verify::{PublicKey, Signature};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -201,14 +202,8 @@ pub fn install_update(update: &AvailableUpdate) -> Result<(), UpdateError> {
     validate_binary_name(&update.artifact.binary)?;
     refuse_development_binary()?;
 
-    let public_key = if public_key.contains('\n') {
-        PublicKey::decode(public_key)
-    } else {
-        PublicKey::from_base64(public_key.trim())
-    }
-    .map_err(|error| UpdateError::PublicKey(error.to_string()))?;
-    let signature = Signature::decode(&update.artifact.signature)
-        .map_err(|error| UpdateError::Signature(error.to_string()))?;
+    let public_key = decode_public_key(public_key)?;
+    let signature = decode_signature(&update.artifact.signature)?;
 
     let updates_dir = findex_home().join("updates");
     std::fs::create_dir_all(&updates_dir)?;
@@ -271,6 +266,39 @@ fn download_verified(
     verifier
         .finalize()
         .map_err(|error| UpdateError::Verification(error.to_string()))
+}
+
+/// Accept both standard Minisign public keys and Tauri's base64-wrapped
+/// representation of the complete `.pub` file.
+fn decode_public_key(value: &str) -> Result<PublicKey, UpdateError> {
+    let value = value.trim();
+    if value.contains('\n') {
+        return PublicKey::decode(value).map_err(|error| UpdateError::PublicKey(error.to_string()));
+    }
+    if let Ok(key) = PublicKey::from_base64(value) {
+        return Ok(key);
+    }
+    let decoded = STANDARD
+        .decode(value)
+        .map_err(|error| UpdateError::PublicKey(error.to_string()))?;
+    let decoded =
+        std::str::from_utf8(&decoded).map_err(|error| UpdateError::PublicKey(error.to_string()))?;
+    PublicKey::decode(decoded).map_err(|error| UpdateError::PublicKey(error.to_string()))
+}
+
+/// Tauri wraps the complete four-line Minisign signature in base64 for its
+/// updater JSON. Native Minisign signatures remain accepted as well.
+fn decode_signature(value: &str) -> Result<Signature, UpdateError> {
+    let value = value.trim();
+    if value.contains('\n') {
+        return Signature::decode(value).map_err(|error| UpdateError::Signature(error.to_string()));
+    }
+    let decoded = STANDARD
+        .decode(value)
+        .map_err(|error| UpdateError::Signature(error.to_string()))?;
+    let decoded =
+        std::str::from_utf8(&decoded).map_err(|error| UpdateError::Signature(error.to_string()))?;
+    Signature::decode(decoded).map_err(|error| UpdateError::Signature(error.to_string()))
 }
 
 fn extract_binary(archive: &Path, binary: &str, destination: &Path) -> Result<(), UpdateError> {
@@ -425,5 +453,20 @@ mod tests {
         assert!(validate_binary_name("findex.exe").is_ok());
         assert!(validate_binary_name("../findex.exe").is_err());
         assert!(validate_binary_name("bin/findex").is_err());
+    }
+
+    #[test]
+    fn tauri_wrapped_key_and_signature_verify_end_to_end() {
+        let public_key =
+            decode_public_key(include_str!("../tests/fixtures/updater_public_key.txt")).unwrap();
+        let signature =
+            decode_signature(include_str!("../tests/fixtures/updater_payload.txt.sig")).unwrap();
+        public_key
+            .verify(
+                include_bytes!("../tests/fixtures/updater_payload.txt"),
+                &signature,
+                false,
+            )
+            .unwrap();
     }
 }

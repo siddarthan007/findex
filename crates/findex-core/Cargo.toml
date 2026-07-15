@@ -53,6 +53,7 @@ hf-hub = { workspace = true }
 reqwest = { workspace = true }
 semver = { workspace = true }
 minisign-verify = { workspace = true }
+base64 = { workspace = true }
 zip = { workspace = true }
 self-replace = { workspace = true }
 tempfile = { workspace = true }

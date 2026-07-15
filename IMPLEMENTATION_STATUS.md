@@ -67,7 +67,7 @@ This file records what is implemented from `implementation_plan.md` and keeps pr
 
 ## Correctness and verification
 
-- 84 `findex-core` tests and 2 `findex-cli` tests pass, including updater transport/path safety, model-profile and vector-fingerprint migration, wide-AST memory bounds, VFS persistence/eviction, graph-pruning behavior, trace validation, complex C#/Ruby/PHP/Swift OOP fixtures, ingestion sprite clipping, and every TUI view.
+- 85 `findex-core` tests and 2 `findex-cli` tests pass, including real Tauri/Minisign updater-format compatibility, updater transport/path safety, model-profile and vector-fingerprint migration, wide-AST memory bounds, VFS persistence/eviction, graph-pruning behavior, trace validation, complex C#/Ruby/PHP/Swift OOP fixtures, ingestion sprite clipping, and every TUI view.
 - `cargo test --workspace --locked` and `cargo clippy --workspace --all-targets --locked -- -D warnings` pass.
 - Vue, Merkle, Stack Graph, generated-tree exclusion, normalized AST lookup, connected graph sampling, HTTP header policy, and MCP task lifecycle have direct tests.
 - The production React bundle type-checks/builds; rendered browser QA covered graph settling, architecture, manual query, layout, and console warnings/errors. Tauri produces the desktop binary plus NSIS and WiX installers on Windows.
