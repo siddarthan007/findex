@@ -419,7 +419,7 @@ mod tests {
                 event_type: "bounded".to_string(),
                 created_at: "2026-07-16T00:00:00Z".to_string(),
                 platform: "test/test".to_string(),
-                app_version: "3.1.0".to_string(),
+                app_version: "3.1.1".to_string(),
                 encoding: "zstd+base64".to_string(),
                 payload: "eA".to_string(),
                 contains_source: false,
