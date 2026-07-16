@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::System;
@@ -22,6 +23,7 @@ pub struct RuntimeProfile {
     pub gpu_memory_limit_bytes: usize,
     pub model_policy: String,
     pub model_profile: String,
+    pub compute_device: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,44 @@ pub struct GpuDevice {
     pub used_memory_mib: u64,
     pub utilization_percent: u8,
     pub temperature_celsius: Option<u8>,
+}
+
+static COMPUTE_DEVICE: AtomicU8 = AtomicU8::new(0);
+static MEMORY_BUDGET_MIB: AtomicU64 = AtomicU64::new(0);
+static GPU_MEMORY_LIMIT_MIB: AtomicU64 = AtomicU64::new(0);
+static MODEL_IDLE_SECONDS: AtomicU64 = AtomicU64::new(0);
+
+/// Apply persisted controls without rebuilding the binary. Explicit process
+/// environment variables continue to win for managed/CI deployments.
+pub fn apply_runtime_settings(settings: &crate::settings::FindexSettings) {
+    use crate::settings::ComputeDevice;
+    COMPUTE_DEVICE.store(
+        match settings.runtime.compute_device {
+            ComputeDevice::Auto => 0,
+            ComputeDevice::Cpu => 1,
+            ComputeDevice::Cuda => 2,
+        },
+        Ordering::Relaxed,
+    );
+    MEMORY_BUDGET_MIB.store(settings.runtime.memory_budget_mib, Ordering::Relaxed);
+    GPU_MEMORY_LIMIT_MIB.store(settings.runtime.gpu_memory_limit_mib, Ordering::Relaxed);
+    MODEL_IDLE_SECONDS.store(settings.runtime.model_idle_seconds, Ordering::Relaxed);
+    crate::models::set_runtime_model_profile(&settings.runtime.model_profile);
+}
+
+pub fn onnx_device() -> &'static str {
+    if let Ok(device) = std::env::var("FINDEX_ONNX_DEVICE") {
+        return match device.to_ascii_lowercase().as_str() {
+            "cpu" => "cpu",
+            "cuda" => "cuda",
+            _ => "auto",
+        };
+    }
+    match COMPUTE_DEVICE.load(Ordering::Relaxed) {
+        1 => "cpu",
+        2 => "cuda",
+        _ => "auto",
+    }
 }
 
 pub fn configured_rayon_threads() -> usize {
@@ -59,27 +99,35 @@ pub fn start_model_idle_janitor(
     embedder: &Arc<dyn crate::search::vector::Embedder>,
     reranker: &Arc<dyn crate::search::rerank::Reranker>,
 ) {
-    let idle_seconds = std::env::var("FINDEX_MODEL_IDLE_SECS")
+    let environment_idle_seconds = std::env::var("FINDEX_MODEL_IDLE_SECS")
         .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(300);
-    if idle_seconds == 0 {
+        .and_then(|value| value.parse::<u64>().ok());
+    if environment_idle_seconds == Some(0) {
         return;
     }
-    let idle_for = Duration::from_secs(idle_seconds.clamp(30, 86_400));
-    let interval = idle_for.div_f32(2.0).max(Duration::from_secs(15));
     let embedder = Arc::downgrade(embedder);
     let reranker = Arc::downgrade(reranker);
     let _ = std::thread::Builder::new()
         .name("findex-model-idle".to_string())
         .spawn(move || loop {
-            std::thread::sleep(interval);
+            // Poll at a low fixed frequency so a settings change takes effect
+            // without restarting a long-running desktop or MCP process.
+            std::thread::sleep(Duration::from_secs(15));
             let Some(embedder) = embedder.upgrade() else {
                 break;
             };
             let Some(reranker) = reranker.upgrade() else {
                 break;
             };
+            let idle_seconds = environment_idle_seconds.unwrap_or_else(|| {
+                let configured = MODEL_IDLE_SECONDS.load(Ordering::Relaxed);
+                if configured == 0 {
+                    300
+                } else {
+                    configured
+                }
+            });
+            let idle_for = Duration::from_secs(idle_seconds.clamp(30, 86_400));
             let embedding_released = embedder.release_idle_resources(idle_for);
             let reranker_released = reranker.release_idle_resources(idle_for);
             if embedding_released || reranker_released {
@@ -103,7 +151,14 @@ pub fn profile(include_gpu: bool) -> RuntimeProfile {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(|mib| mib.saturating_mul(1024 * 1024))
-        .unwrap_or(default_budget);
+        .unwrap_or_else(|| {
+            let configured = MEMORY_BUDGET_MIB.load(Ordering::Relaxed);
+            if configured == 0 {
+                default_budget
+            } else {
+                configured.saturating_mul(1024 * 1024)
+            }
+        });
     let gpu_devices = if include_gpu {
         query_nvidia_gpus()
     } else {
@@ -148,6 +203,7 @@ pub fn profile(include_gpu: bool) -> RuntimeProfile {
         gpu_memory_limit_bytes: gpu_memory_limit_bytes(),
         model_policy: format!("{:?}", crate::models::model_policy()).to_ascii_lowercase(),
         model_profile: crate::models::model_profile().to_string(),
+        compute_device: onnx_device().to_string(),
     }
 }
 
@@ -168,6 +224,12 @@ pub fn gpu_memory_limit_bytes() -> usize {
         .and_then(|value| value.parse::<usize>().ok())
     {
         return mib.saturating_mul(1024 * 1024).max(256 * 1024 * 1024);
+    }
+    let configured = GPU_MEMORY_LIMIT_MIB.load(Ordering::Relaxed);
+    if configured > 0 {
+        return (configured as usize)
+            .saturating_mul(1024 * 1024)
+            .max(256 * 1024 * 1024);
     }
 
     let available_mib = query_nvidia_gpus()

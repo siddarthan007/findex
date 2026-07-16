@@ -2,9 +2,10 @@
 /target/
 /crates/findex-tauri/node_modules/
 /crates/findex-tauri/ui/dist/
+/crates/findex-tauri/binaries/
 
 # Local indexes, models, and agent state
-/.findex_db/
+**/.findex_db/
 /.models/
 /.codex/
 /.agents/

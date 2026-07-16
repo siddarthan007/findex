@@ -13,8 +13,12 @@ pub enum WatchError {
     Notify(#[from] notify::Error),
     #[error("Ingestion error: {0}")]
     Ingestion(#[from] IngestionError),
+    #[error("Settings error: {0}")]
+    Settings(#[from] crate::settings::SettingsError),
     #[error("Channel receiver error: {0}")]
     Channel(#[from] std::sync::mpsc::RecvError),
+    #[error("File watching is disabled in runtime settings; enable indexing.watcher first")]
+    Disabled,
 }
 
 /// Watches a codebase directory and re-indexes incrementally when source files change.
@@ -28,6 +32,9 @@ pub fn watch_codebase<P: AsRef<Path>, D: AsRef<Path>>(
 ) -> Result<(), WatchError> {
     let root = root_dir.as_ref().to_path_buf();
     let db_path = db_dir.as_ref().to_path_buf();
+    if !crate::settings::load(&db_path)?.indexing.watcher {
+        return Err(WatchError::Disabled);
+    }
 
     let (tx, rx) = std::sync::mpsc::channel::<Vec<std::path::PathBuf>>();
 

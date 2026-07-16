@@ -15,10 +15,12 @@ Its differentiator from editor search is the retrieval product: Findex does not 
 - Major-language indexing now covers JavaScript/TypeScript/JSX/TSX, Vue, Rust, Python, HTML/CSS, Dart, C/C++, Go, Java, C#, Ruby, PHP, and Swift. OOP contracts, inheritance, constructors, methods, modules/namespaces, traits/mixins/protocols, records, extensions, and enum variants are normalized into the shared graph model.
 - Structural prefetch is hop/fan-out/work-set bounded; context bundles combine retrieval anchors with graph-local neighbors and include an auditable selection reason. Token graph pruning preserves explicit seeds and skips oversized distractions instead of terminating the search.
 - The session VFS stores shared `Arc<str>` content under byte/file caps with LRU eviction, versioned BLAKE3 hashes, and isolated micro-compilation. Semantic diffs switch to linear-memory keyed alignment for wide ASTs and cap reported source payloads. Trace/taint propagation reads adjacency on demand and pins accumulated evidence tags.
-- A six-view Nord terminal interface: dashboard, debounced hybrid search, graph canvas, manual graph query, impact inspector, and live runtime/GPU policy. Nerd Font glyphs have an ASCII fallback and motion can be disabled.
-- A React/Tauri desktop app with an embedded token-protected Axum API, lazy-loaded WebGL/Three.js graph, search, AST, graph query, impact, and runtime views. The visual system follows compact GitHub-style dark design tokens.
+- A six-view terminal interface with GitHub-light/Nord-dark themes: dashboard, debounced hybrid search, an interactive typed-edge graph with 0-4 hop focus/pan/zoom/fit/pinning, manual graph query, impact inspector, and live runtime/GPU policy. Nerd Font glyphs have an ASCII fallback and motion can be disabled.
+- A React/Tauri desktop app with an embedded token-protected Axum API, lazy-loaded WebGL/Three.js graph, search, AST, graph query, impact, runtime, and persisted settings views. Its restrained light/dark/system visual tokens follow GitHub Primer rather than glass/gradient styling.
 - Three immutable ONNX model profiles: `fast` keeps the MiniLM pair for CPU latency, `balanced` uses quantized code-specialized Jina models, and `quality` uses their full-precision artifacts. Changing model, embedding window, dimension, or vector scalar format automatically invalidates the incompatible vector graph.
 - Signed background update checks for long-running CLI/TUI hosts and Tauri. Installation is never silent: CLI, TUI, and desktop require user consent, then verify the release signature before replacement.
+- One Tauri platform installer contains the desktop executable and the release `findex` sidecar, so the same install adds CLI commands and `findex tui`; Windows packages also maintain the user PATH on install/uninstall.
+- Optional stages are runtime gates, not build variants. Index-local settings control lexical/semantic indexing, reranking, graph expansion, structural prefetch, Stack Graphs, watchers, VFS/trace pinning, graph limits, model/device/memory policy, and UI appearance across CLI, TUI, desktop, and MCP.
 
 ## Retrieval pipeline
 
@@ -52,6 +54,8 @@ Useful human and agent commands:
 
 ```powershell
 findex status --format json
+findex settings show --format json
+findex settings set --graph-hops 1 --candidates 32 --compute auto
 findex doctor --format json
 findex models --offline --format json
 findex update check
@@ -74,6 +78,7 @@ For HTTP, set `FINDEX_MCP_TOKEN` before binding beyond loopback. The current ser
 | `get_graph_snapshot` | Bounded degree-ranked graph classified as God/UI/API/code for planning and visualization. |
 | `get_runtime_profile` | CPU/RAM/GPU, process RSS, memory budget, quantization, and recommended embedding batch. |
 | `get_architecture_overview` | Source-free language/layer/contract/entrypoint/hub digest for first-pass repository orientation. |
+| `get_settings`, `set_setting` | Inspect optional stages and change one user-authorized runtime policy without replacing the build or resetting unrelated controls. |
 | `prune_context` | Structural subgraph under a strict token budget; explicit task anchors are retained. |
 | `vfs_update`, `micro_compile` | Bounded unsaved-file shadowing and isolated parse/relationship validation without touching disk or the persisted index. |
 | `pin_execution_trace` | Attach validated runtime paths to graph adjacency while preserving multiple trace identities. |
@@ -103,11 +108,12 @@ There is no `tasks/create` method in MCP `2025-11-25`; tasks augment the origina
 cd crates/findex-tauri
 npm install
 npm run build
+npm run build:installer:unsigned
 cd ../..
 cargo run -p findex-tauri
 ```
 
-The frontend production build code-splits Three.js: the normal UI bundle loads first and the ~3D graph chunk is fetched only for the graph surface. The local Axum data API binds to `127.0.0.1:37421` by default and uses a random per-process token delivered to the WebView through a Tauri command.
+The unsigned command is a local Windows packaging smoke test. Release CI builds signed updater artifacts from `tauri.updater.conf.json`. Each platform bundle includes the release CLI/TUI sidecar. The frontend production build code-splits Three.js: the normal UI bundle loads first and the 3D graph chunk is fetched only for the graph surface. The local Axum data API first tries `127.0.0.1:37421`, falls back to an ephemeral loopback port if occupied, and uses a random per-process token delivered to the WebView through a Tauri command.
 
 Packaged desktop releases check the signed GitHub `latest.json` after startup without blocking the UI. A compact banner opens a release-details dialog; download and installation begin only after the user selects **Install update**. CLI/TUI releases use the same public trust root with `latest-cli.json`; use `findex update check`, `findex update install`, or F8 in the TUI. Local developer builds have no compiled public key and remain network-silent.
 
@@ -120,6 +126,21 @@ Packaged desktop releases check the signed GitHub `latest.json` after startup wi
 | `quality` | full-precision Jina code model | full-precision Jina reranker | Evaluation/offline use with more RAM, disk, and inference time. |
 
 The MiniLM models remain good speed baselines, but the embedder is general-purpose, truncates at a short window, and is not trained specifically for code. The balanced embedding model covers 30 programming languages and an 8K model context; the balanced reranker is a 37.8M-parameter 6-layer cross-encoder with an 8K model context. Findex still bounds actual windows and rerank depth because feeding maximum context to every candidate hurts latency. Model-card benchmark gains are not treated as Findex gains: run a repository-specific relevance set before promoting a profile.
+
+Production hosts are cache-first and non-blocking: when a pinned model is missing, a named background worker acquires it while deterministic dimension-compatible retrieval remains available, then atomically swaps in the verified ONNX component. An embedding fingerprint change triggers a vector-index rebuild before old and new vectors can mix.
+
+## Runtime settings
+
+Settings live beside the project index and are shared by every interface:
+
+```powershell
+findex settings show
+findex settings set --lexical true --semantic true --reranking true
+findex settings set --graph-expansion true --structural-prefetch true --graph-hops 1
+findex settings set --model-profile balanced --compute auto --memory-mib 2048 --gpu-memory-mib 4096
+```
+
+The MCP equivalents are `get_settings` and the single-key `set_setting`. Search responses and context bundles report the effective retrieval path, so a disabled semantic or lexical leg cannot silently masquerade as hybrid retrieval. If both legs are disabled, search returns an explicit configuration error while graph/navigation/AST tools remain usable.
 
 `CodeRankEmbed` is a credible code-specialized alternative with an 8K context and strong author-reported CodeSearchNet/CoIR results, but its official repository currently does not ship an ONNX artifact. It remains an override/evaluation candidate rather than forcing conversion risk into the default installer. Moving from the 6-layer to the 12-layer MS MARCO MiniLM reranker is not useful here: the published MS MARCO table reports effectively identical ranking quality with much lower throughput for the 12-layer variant.
 
@@ -137,7 +158,7 @@ The MiniLM models remain good speed baselines, but the embedder is general-purpo
 | `FINDEX_RERANK_CANDIDATES` | profile-aware | Stage-two depth (`24` fast, `16` balanced, `12` quality). |
 | `FINDEX_RERANK_BATCH_SIZE` | `16` | Maximum cross-encoder batch; lower it when CPU cache or VRAM is constrained. |
 | `FINDEX_ONNX_THREADS` | bounded by CPU policy | Intra-op threads for each ONNX model session; inter-op work stays at one thread. |
-| `FINDEX_ONNX_DEVICE` | `auto` | `auto` or `cpu`; CUDA requires the `cuda` feature and compatible libraries. |
+| `FINDEX_ONNX_DEVICE` | `auto` | `auto`, `cpu`, or `cuda`; CUDA requires the feature, provider, driver, and compatible libraries and otherwise falls back to CPU. |
 | `FINDEX_CUDA_DEVICE_ID` | `0` | CUDA device ordinal. |
 | `FINDEX_GPU_MEMORY_LIMIT_MB` | adaptive, max 4096 MiB | ONNX CUDA arena cap; does not cap every CUDA allocation. |
 | `FINDEX_MODEL_IDLE_SECS` | `300` | Release idle embedding/reranker sessions; `0` disables eviction. Sessions reload lazily. |
@@ -167,7 +188,8 @@ Stack Graph exact cross-file resolution remains limited to its shipped Python, J
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cd crates/findex-tauri; npm run build
+Push-Location crates/findex-tauri; npm run build; npm run build:installer:unsigned; Pop-Location
+python $HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py .
 ```
 
-See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for exact plan coverage, [plan.md](plan.md) for the project constitution, and [architecture.md](architecture.md) for the research architecture.
+See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for exact plan coverage, [COMPETITIVE_EDGE_ROADMAP.md](COMPETITIVE_EDGE_ROADMAP.md) for benchmark-gated next advantages, [plan.md](plan.md) for the project constitution, and [architecture.md](architecture.md) for the research architecture.

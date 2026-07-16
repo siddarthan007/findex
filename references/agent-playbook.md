@@ -50,6 +50,22 @@ Use 1024 tokens to locate, 2048 to implement a local change, and 4096 for a genu
 
 Carry forward IDs, signatures, path:line ranges, and a one-sentence verified role. Drop full tool payloads once those facts are captured. Never paste graph snapshots, file inventories, or model diagnostics into the implementation prompt unless directly relevant.
 
+### Hypothesis and evidence ledger
+
+Keep a compact three-column mental record: claim, evidence, confidence. Mark source ranges and exact graph edges as observed; mark architectural conclusions as inferred. Retrieve only the next item needed to promote an important inference to observed evidence.
+
+### Query decomposition
+
+For a cross-layer task, issue one precise query per boundary (entrypoint, contract, persistence, test) and merge exact IDs before requesting a context bundle. Do not ask one dense query to solve localization, architecture, impact, and validation simultaneously.
+
+### Retrieval self-check
+
+Before acting, ask: did the reported effective mode match the intended mode, was the result truncated, is the edge exact/trace-backed or heuristic, and is the index newer than the relevant source? A high score does not override a failed freshness or provenance check.
+
+### Counterfactual verification
+
+When two owners are plausible, search both the expected behavior and an explicit exclusion, then verify callers/tests for the winner. This reduces edits to similarly named but inactive implementations.
+
 ## Task recipes
 
 ### Fix a bug

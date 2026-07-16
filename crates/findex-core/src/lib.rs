@@ -12,6 +12,7 @@ pub mod resolver;
 pub mod runtime;
 pub mod search;
 pub mod semantic_diff;
+pub mod settings;
 pub mod skeleton;
 #[cfg(feature = "stack-graphs")]
 pub mod stack_graphs;
@@ -102,6 +103,8 @@ pub struct IngestionOptions {
     pub build_lexical_index: bool,
     /// Build the USearch vector index.
     pub build_vector_index: bool,
+    /// Run exact Stack Graph resolution where a production language package is available.
+    pub resolve_stack_graphs: bool,
 }
 
 impl Default for IngestionOptions {
@@ -111,6 +114,7 @@ impl Default for IngestionOptions {
         Self {
             build_lexical_index: true,
             build_vector_index: false,
+            resolve_stack_graphs: true,
         }
     }
 }
@@ -123,7 +127,18 @@ pub fn ingest_codebase<P: AsRef<Path>, D: AsRef<Path>>(
     db_dir: D,
     storage: &Storage,
 ) -> Result<IngestionStats, IngestionError> {
-    ingest_codebase_with_options(root_dir, db_dir, storage, IngestionOptions::default())
+    let db_path = db_dir.as_ref();
+    let settings = crate::settings::load_or_default(db_path);
+    ingest_codebase_with_options(
+        root_dir,
+        db_path,
+        storage,
+        IngestionOptions {
+            build_lexical_index: settings.indexing.lexical_index,
+            build_vector_index: false,
+            resolve_stack_graphs: settings.indexing.stack_graphs,
+        },
+    )
 }
 
 /// Full ingestion including the USearch vector index. Use when you want all
@@ -133,13 +148,16 @@ pub fn ingest_codebase_full<P: AsRef<Path>, D: AsRef<Path>>(
     db_dir: D,
     storage: &Storage,
 ) -> Result<IngestionStats, IngestionError> {
+    let db_path = db_dir.as_ref();
+    let settings = crate::settings::load_or_default(db_path);
     ingest_codebase_with_options(
         root_dir,
-        db_dir,
+        db_path,
         storage,
         IngestionOptions {
-            build_lexical_index: true,
-            build_vector_index: true,
+            build_lexical_index: settings.indexing.lexical_index,
+            build_vector_index: settings.indexing.semantic_index,
+            resolve_stack_graphs: settings.indexing.stack_graphs,
         },
     )
 }
@@ -151,13 +169,16 @@ pub fn ingest_codebase_phase0<P: AsRef<Path>, D: AsRef<Path>>(
     db_dir: D,
     storage: &Storage,
 ) -> Result<IngestionStats, IngestionError> {
+    let db_path = db_dir.as_ref();
+    let settings = crate::settings::load_or_default(db_path);
     ingest_codebase_with_options(
         root_dir,
-        db_dir,
+        db_path,
         storage,
         IngestionOptions {
             build_lexical_index: false,
             build_vector_index: false,
+            resolve_stack_graphs: settings.indexing.stack_graphs,
         },
     )
 }
@@ -212,7 +233,7 @@ pub fn build_vector_index_with_embedder<P: AsRef<Path>>(
     Ok(())
 }
 
-fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
+pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     root_dir: P,
     db_dir: D,
     storage: &Storage,
@@ -454,7 +475,7 @@ fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     }
 
     #[cfg(feature = "stack-graphs")]
-    let stack_graph_edges = {
+    let stack_graph_edges = if options.resolve_stack_graphs {
         let stats =
             crate::stack_graphs::resolve_into_storage(root, storage).unwrap_or_else(|error| {
                 crate::stack_graphs::StackGraphStats {
@@ -466,6 +487,16 @@ fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
         let count = stats.resolved_edges;
         storage.set_metadata("stack-graphs:last", &stats)?;
         count
+    } else {
+        storage.set_metadata(
+            "stack-graphs:last",
+            &crate::stack_graphs::StackGraphStats {
+                enabled: false,
+                message: "disabled by runtime settings".to_string(),
+                ..Default::default()
+            },
+        )?;
+        0
     };
     #[cfg(not(feature = "stack-graphs"))]
     let stack_graph_edges = 0;
@@ -638,6 +669,66 @@ pub fn search_codebase<P: AsRef<Path>>(
 
 /// Search with preloaded model components. MCP, TUI, and desktop callers use
 /// this entry point so repeated queries share their ONNX sessions.
+#[derive(Debug, Clone, Copy)]
+pub struct SearchOptions {
+    pub lexical_search: bool,
+    pub semantic_search: bool,
+    pub reranking: bool,
+    pub graph_expansion: bool,
+    pub graph_hops: u32,
+    pub candidate_limit: usize,
+    pub mmr_lambda: f32,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            lexical_search: true,
+            semantic_search: true,
+            reranking: true,
+            graph_expansion: true,
+            graph_hops: 1,
+            candidate_limit: rerank_candidate_limit(),
+            mmr_lambda: 0.75,
+        }
+    }
+}
+
+impl From<&crate::settings::FindexSettings> for SearchOptions {
+    fn from(settings: &crate::settings::FindexSettings) -> Self {
+        Self {
+            lexical_search: settings.indexing.lexical_index,
+            semantic_search: settings.retrieval.semantic_search && settings.indexing.semantic_index,
+            reranking: settings.retrieval.reranking,
+            graph_expansion: settings.retrieval.graph_expansion,
+            graph_hops: settings.retrieval.graph_hops,
+            candidate_limit: settings.retrieval.candidate_limit,
+            mmr_lambda: settings.retrieval.mmr_lambda,
+        }
+    }
+}
+
+pub(crate) fn effective_search_mode(
+    requested: &str,
+    options: SearchOptions,
+) -> Result<&'static str, IngestionError> {
+    match requested {
+        "lexical" if options.lexical_search => Ok("lexical"),
+        "lexical" if options.semantic_search => Ok("semantic"),
+        "semantic" if options.semantic_search => Ok("semantic"),
+        "semantic" if options.lexical_search => Ok("lexical"),
+        "hybrid" if options.lexical_search && options.semantic_search => Ok("hybrid"),
+        "hybrid" if options.lexical_search => Ok("lexical"),
+        "hybrid" if options.semantic_search => Ok("semantic"),
+        "lexical" | "semantic" | "hybrid" => Err(IngestionError::InvalidRequest(
+            "lexical and semantic retrieval are both disabled in settings".to_string(),
+        )),
+        other => Err(IngestionError::InvalidRequest(format!(
+            "unknown search mode '{other}'; expected lexical, semantic, or hybrid"
+        ))),
+    }
+}
+
 pub fn search_codebase_with_components<P: AsRef<Path>>(
     db_dir: P,
     storage: &Storage,
@@ -648,16 +739,47 @@ pub fn search_codebase_with_components<P: AsRef<Path>>(
     limit: usize,
 ) -> Result<Vec<(Symbol, f32)>, IngestionError> {
     let db_path = db_dir.as_ref();
-    let limit = limit.max(1);
+    let settings = crate::settings::load_or_default(db_path);
+    search_codebase_with_options(
+        db_path,
+        storage,
+        query,
+        mode,
+        reranker,
+        embedder,
+        limit,
+        SearchOptions::from(&settings),
+    )
+}
 
-    // If reranker is present, fetch more candidates (up to 50) for stage 2
+/// Search with explicit, already-validated runtime controls. Long-lived services
+/// should use this entry point to avoid reading the settings file per query.
+#[allow(clippy::too_many_arguments)]
+pub fn search_codebase_with_options<P: AsRef<Path>>(
+    db_dir: P,
+    storage: &Storage,
+    query: &str,
+    mode: &str,
+    reranker: Option<&dyn search::rerank::Reranker>,
+    embedder: &dyn crate::search::vector::Embedder,
+    limit: usize,
+    options: SearchOptions,
+) -> Result<Vec<(Symbol, f32)>, IngestionError> {
+    let db_path = db_dir.as_ref();
+    let limit = limit.max(1);
+    let reranker = reranker.filter(|_| options.reranking);
+    let effective_mode = effective_search_mode(mode, options)?;
+
+    // Reranking and MMR need a bounded pool, but never force a hard-coded 50+50
+    // inference workload when the configured pool is smaller.
     let stage1_limit = if reranker.is_some() {
-        limit.max(rerank_candidate_limit())
+        limit.max(options.candidate_limit)
     } else {
         limit
-    };
+    }
+    .clamp(1, 200);
 
-    let ranked_ids = match mode {
+    let ranked_ids = match effective_mode {
         "lexical" => {
             let lexical_index = ensure_lexical_index(db_path, storage)?;
             lexical_index.search(query, stage1_limit)?
@@ -672,11 +794,11 @@ pub fn search_codebase_with_components<P: AsRef<Path>>(
             let (lex_results, vec_results) = rayon::join(
                 || -> Result<_, IngestionError> {
                     let lexical_index = ensure_lexical_index(db_path, storage)?;
-                    Ok(lexical_index.search(query, 50)?)
+                    Ok(lexical_index.search(query, stage1_limit)?)
                 },
                 || -> Result<_, IngestionError> {
                     let vector_index = ensure_vector_index(db_path, storage, embedder)?;
-                    Ok(vector_index.search(query, 50, embedder)?)
+                    Ok(vector_index.search(query, stage1_limit, embedder)?)
                 },
             );
             let lex_results = lex_results?;
@@ -735,22 +857,30 @@ pub fn search_codebase_with_components<P: AsRef<Path>>(
             .or_insert_with(|| (symbol.clone(), *score));
     }
 
-    for (seed, score) in results.iter().take(5) {
-        for related in crate::resolver::expand_context(&seed.id, 1, storage)? {
-            if related.id == seed.id {
-                continue;
+    if options.graph_expansion && options.graph_hops > 0 {
+        for (seed, score) in results.iter().take(5) {
+            for related in crate::resolver::expand_context_ranked(
+                &seed.id,
+                options.graph_hops,
+                options.candidate_limit,
+                storage,
+            )? {
+                let discounted = *score * related.score;
+                expanded_by_id
+                    .entry(related.symbol.id.clone())
+                    .and_modify(|existing| existing.1 = existing.1.max(discounted))
+                    .or_insert((related.symbol, discounted));
             }
-            let discounted = *score * 0.5;
-            expanded_by_id
-                .entry(related.id.clone())
-                .and_modify(|existing| existing.1 = existing.1.max(discounted))
-                .or_insert((related, discounted));
         }
     }
 
     let mut expanded: Vec<(Symbol, f32)> = expanded_by_id.into_values().collect();
     expanded.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(mmr_diversify(&expanded, limit, 0.75))
+    Ok(mmr_diversify(
+        &expanded,
+        limit,
+        options.mmr_lambda.clamp(0.0, 1.0),
+    ))
 }
 
 fn rerank_candidate_limit() -> usize {
@@ -847,6 +977,38 @@ mod tests {
     use super::*;
     use std::fs::write;
     use tempfile::tempdir;
+
+    #[test]
+    fn search_mode_respects_runtime_index_gates() {
+        let both = SearchOptions::default();
+        assert_eq!(effective_search_mode("hybrid", both).unwrap(), "hybrid");
+
+        let semantic_only = SearchOptions {
+            lexical_search: false,
+            ..both
+        };
+        assert_eq!(
+            effective_search_mode("lexical", semantic_only).unwrap(),
+            "semantic"
+        );
+
+        let lexical_only = SearchOptions {
+            semantic_search: false,
+            ..both
+        };
+        assert_eq!(
+            effective_search_mode("semantic", lexical_only).unwrap(),
+            "lexical"
+        );
+
+        let disabled = SearchOptions {
+            lexical_search: false,
+            semantic_search: false,
+            ..both
+        };
+        assert!(effective_search_mode("hybrid", disabled).is_err());
+        assert!(effective_search_mode("typo", both).is_err());
+    }
 
     #[test]
     fn test_search_and_skeleton() {

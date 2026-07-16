@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
-import { mockGraph, mockRuntime, mockStats } from './mock';
-import type { ArchitectureOverview, AstOutline, DesktopUpdateInfo, GraphSnapshot, ImpactReport, RuntimeProfile, SearchResult, Stats } from './types';
+import { mockGraph, mockRuntime, mockSettings, mockStats } from './mock';
+import type { ArchitectureOverview, AstOutline, DesktopUpdateInfo, FindexSettings, GraphSnapshot, ImpactReport, RuntimeProfile, SearchResult, Stats } from './types';
 
 const isTauri = () => '__TAURI_INTERNALS__' in window;
 let connection: Promise<{ baseUrl: string; token: string }> | null = null;
@@ -30,6 +30,14 @@ export const api = {
   },
   async runtime(): Promise<RuntimeProfile> {
     return isTauri() ? request('/api/runtime') : mockRuntime;
+  },
+  async settings(): Promise<FindexSettings> {
+    if (!isTauri()) return mockSettings;
+    return request('/api/settings');
+  },
+  async saveSettings(settings: FindexSettings): Promise<FindexSettings> {
+    if (!isTauri()) return settings;
+    return request('/api/settings', settings);
   },
   async architecture(): Promise<ArchitectureOverview> {
     if (!isTauri()) return {

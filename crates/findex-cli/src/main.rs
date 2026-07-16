@@ -196,6 +196,11 @@ enum Commands {
         #[command(subcommand)]
         command: UpdateCommand,
     },
+    /// Inspect or change persisted production feature and resource controls
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
     /// Build or rebuild the vector index from stored symbols
     BuildVectors,
     /// Compare two source files structurally
@@ -227,6 +232,61 @@ enum UpdateCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum SettingsCommand {
+    /// Print the effective settings for this index
+    Show,
+    /// Change only the supplied values; omitted settings are preserved
+    Set {
+        #[arg(long)]
+        lexical: Option<bool>,
+        #[arg(long)]
+        semantic: Option<bool>,
+        #[arg(long)]
+        reranking: Option<bool>,
+        #[arg(long)]
+        graph_expansion: Option<bool>,
+        #[arg(long)]
+        structural_prefetch: Option<bool>,
+        #[arg(long)]
+        stack_graphs: Option<bool>,
+        #[arg(long)]
+        watcher: Option<bool>,
+        #[arg(long)]
+        vfs_shadowing: Option<bool>,
+        #[arg(long)]
+        trace_pinning: Option<bool>,
+        #[arg(long)]
+        graph_hops: Option<u32>,
+        #[arg(long)]
+        candidates: Option<usize>,
+        #[arg(long)]
+        token_budget: Option<usize>,
+        #[arg(long)]
+        mmr_lambda: Option<f32>,
+        #[arg(long)]
+        compute: Option<findex_core::settings::ComputeDevice>,
+        #[arg(long)]
+        model_profile: Option<findex_core::models::ModelProfile>,
+        #[arg(long)]
+        memory_mib: Option<u64>,
+        #[arg(long)]
+        gpu_memory_mib: Option<u64>,
+        #[arg(long)]
+        idle_seconds: Option<u64>,
+        #[arg(long)]
+        theme: Option<findex_core::settings::ThemePreference>,
+        #[arg(long)]
+        motion: Option<bool>,
+        #[arg(long)]
+        graph_particles: Option<bool>,
+        #[arg(long)]
+        graph_labels: Option<bool>,
+    },
+    /// Restore production defaults
+    Reset,
+}
+
 impl Cli {
     fn output_format(&self) -> OutputFormat {
         if self.json {
@@ -246,6 +306,8 @@ fn print_json(value: serde_json::Value) -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     findex_core::runtime::configure_runtime();
     let cli = Cli::parse();
+    let persisted_settings = findex_core::settings::load_or_default(&cli.db_path);
+    findex_core::runtime::apply_runtime_settings(&persisted_settings);
     let format = cli.output_format();
 
     match &cli.command {
@@ -897,6 +959,108 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         },
+        Commands::Settings { command } => {
+            let settings = match command {
+                SettingsCommand::Show => findex_core::settings::load(&cli.db_path)?,
+                SettingsCommand::Reset => findex_core::settings::reset(&cli.db_path)?,
+                SettingsCommand::Set {
+                    lexical,
+                    semantic,
+                    reranking,
+                    graph_expansion,
+                    structural_prefetch,
+                    stack_graphs,
+                    watcher,
+                    vfs_shadowing,
+                    trace_pinning,
+                    graph_hops,
+                    candidates,
+                    token_budget,
+                    mmr_lambda,
+                    compute,
+                    model_profile,
+                    memory_mib,
+                    gpu_memory_mib,
+                    idle_seconds,
+                    theme,
+                    motion,
+                    graph_particles,
+                    graph_labels,
+                } => {
+                    let mut settings = findex_core::settings::load(&cli.db_path)?;
+                    if let Some(value) = lexical {
+                        settings.indexing.lexical_index = *value;
+                    }
+                    if let Some(value) = semantic {
+                        settings.indexing.semantic_index = *value;
+                        settings.retrieval.semantic_search = *value;
+                    }
+                    if let Some(value) = reranking {
+                        settings.retrieval.reranking = *value;
+                    }
+                    if let Some(value) = graph_expansion {
+                        settings.retrieval.graph_expansion = *value;
+                    }
+                    if let Some(value) = structural_prefetch {
+                        settings.retrieval.structural_prefetch = *value;
+                    }
+                    if let Some(value) = stack_graphs {
+                        settings.indexing.stack_graphs = *value;
+                    }
+                    if let Some(value) = watcher {
+                        settings.indexing.watcher = *value;
+                    }
+                    if let Some(value) = vfs_shadowing {
+                        settings.indexing.vfs_shadowing = *value;
+                    }
+                    if let Some(value) = trace_pinning {
+                        settings.indexing.execution_trace_pinning = *value;
+                    }
+                    if let Some(value) = graph_hops {
+                        settings.retrieval.graph_hops = *value;
+                    }
+                    if let Some(value) = candidates {
+                        settings.retrieval.candidate_limit = *value;
+                    }
+                    if let Some(value) = token_budget {
+                        settings.retrieval.default_token_budget = *value;
+                    }
+                    if let Some(value) = mmr_lambda {
+                        settings.retrieval.mmr_lambda = *value;
+                    }
+                    if let Some(value) = compute {
+                        settings.runtime.compute_device = *value;
+                    }
+                    if let Some(value) = model_profile {
+                        settings.runtime.model_profile = value.to_string();
+                    }
+                    if let Some(value) = memory_mib {
+                        settings.runtime.memory_budget_mib = *value;
+                    }
+                    if let Some(value) = gpu_memory_mib {
+                        settings.runtime.gpu_memory_limit_mib = *value;
+                    }
+                    if let Some(value) = idle_seconds {
+                        settings.runtime.model_idle_seconds = *value;
+                    }
+                    if let Some(value) = theme {
+                        settings.ui.theme = *value;
+                    }
+                    if let Some(value) = motion {
+                        settings.ui.motion = *value;
+                    }
+                    if let Some(value) = graph_particles {
+                        settings.ui.graph_particles = *value;
+                    }
+                    if let Some(value) = graph_labels {
+                        settings.ui.graph_labels = *value;
+                    }
+                    findex_core::settings::save(&cli.db_path, settings)?
+                }
+            };
+            findex_core::runtime::apply_runtime_settings(&settings);
+            print_settings(&settings, format)?;
+        }
         Commands::BuildVectors => {
             let storage = Storage::open(&cli.db_path)?;
             let start = Instant::now();
@@ -954,6 +1118,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_settings(
+    settings: &findex_core::settings::FindexSettings,
+    format: OutputFormat,
+) -> anyhow::Result<()> {
+    match format {
+        OutputFormat::Json => print_json(serde_json::to_value(settings)?),
+        OutputFormat::Compact => {
+            println!("{}", serde_json::to_string(settings)?);
+            Ok(())
+        }
+        OutputFormat::Text => {
+            println!("Findex production settings");
+            println!("{}", serde_json::to_string_pretty(settings)?);
+            Ok(())
+        }
+    }
 }
 
 fn print_update_check(check: &findex_core::updater::UpdateCheck) {

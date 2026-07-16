@@ -10,7 +10,7 @@ use findex_core::search::local_embedder::create_embedder;
 use findex_core::search::rerank::{create_reranker, Reranker};
 use findex_core::search::vector::Embedder;
 use findex_core::search_codebase_with_components;
-use findex_core::storage::{Storage, Symbol};
+use findex_core::storage::{EdgeType, Storage, Symbol};
 use findex_core::updater::{AvailableUpdate, UpdateCheck};
 use findex_core::{ingest_codebase, IngestionStats};
 use ratatui::backend::CrosstermBackend;
@@ -28,7 +28,7 @@ use ratatui_image::{
 };
 use ratatui_textarea::TextArea;
 use ratatui_toaster::{ToastBuilder, ToastEngine, ToastEngineBuilder, ToastPosition, ToastType};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::f64::consts::TAU;
 use std::io;
 use std::path::PathBuf;
@@ -48,22 +48,69 @@ use tui_tree_widget::{Tree, TreeItem, TreeState};
 
 mod nord {
     use ratatui::style::Color;
-    pub const BG: Color = Color::Rgb(46, 52, 64); // nord0
-    pub const PANEL: Color = Color::Rgb(59, 66, 82); // nord1
-    pub const PANEL_ALT: Color = Color::Rgb(67, 76, 94); // nord2
-    pub const BORDER: Color = Color::Rgb(76, 86, 106); // nord3
-    pub const TEXT: Color = Color::Rgb(216, 222, 233); // nord4
-    pub const BRIGHT: Color = Color::Rgb(236, 239, 244); // nord6
-    pub const CYAN: Color = Color::Rgb(136, 192, 208); // nord8
-    pub const BLUE: Color = Color::Rgb(129, 161, 193); // nord9
-    pub const GREEN: Color = Color::Rgb(163, 190, 140); // nord14
-    pub const RED: Color = Color::Rgb(191, 97, 106); // nord11
-    pub const YELLOW: Color = Color::Rgb(235, 203, 139); // nord13
-    pub const PURPLE: Color = Color::Rgb(180, 142, 173); // nord15
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static LIGHT: AtomicBool = AtomicBool::new(false);
+
+    pub fn set_light(light: bool) {
+        LIGHT.store(light, Ordering::Relaxed);
+    }
+
+    fn pick(dark: (u8, u8, u8), light: (u8, u8, u8)) -> Color {
+        let (r, g, b) = if LIGHT.load(Ordering::Relaxed) {
+            light
+        } else {
+            dark
+        };
+        Color::Rgb(r, g, b)
+    }
+
+    pub fn bg() -> Color {
+        pick((46, 52, 64), (255, 255, 255))
+    }
+    pub fn panel() -> Color {
+        pick((59, 66, 82), (246, 248, 250))
+    }
+    pub fn panel_alt() -> Color {
+        pick((67, 76, 94), (234, 238, 242))
+    }
+    pub fn border() -> Color {
+        pick((76, 86, 106), (208, 215, 222))
+    }
+    pub fn text() -> Color {
+        pick((216, 222, 233), (31, 35, 40))
+    }
+    pub fn bright() -> Color {
+        pick((236, 239, 244), (13, 17, 23))
+    }
+    pub fn cyan() -> Color {
+        pick((136, 192, 208), (9, 105, 218))
+    }
+    pub fn blue() -> Color {
+        pick((129, 161, 193), (9, 105, 218))
+    }
+    pub fn green() -> Color {
+        pick((163, 190, 140), (26, 127, 55))
+    }
+    pub fn red() -> Color {
+        pick((191, 97, 106), (207, 34, 46))
+    }
+    pub fn yellow() -> Color {
+        pick((235, 203, 139), (154, 103, 0))
+    }
+    pub fn purple() -> Color {
+        pick((180, 142, 173), (130, 80, 223))
+    }
 
     /// Theme token lookup with an automatic ANSI-256 downgrade for terminals
     /// that do not advertise true color.
     pub fn token(name: &str) -> Color {
+        if LIGHT.load(Ordering::Relaxed) {
+            return match name {
+                "border.unfocused" => border(),
+                _ => text(),
+            };
+        }
         let theme = opaline::load_by_name("nord").unwrap_or_default();
         let color = theme.color(name);
         let true_color = std::env::var("COLORTERM")
@@ -130,6 +177,11 @@ pub struct App {
     files: usize,
     edges: usize,
     graph: GraphSnapshot,
+    graph_selected: usize,
+    graph_hops: u32,
+    graph_edge_filter: Option<EdgeType>,
+    graph_pan: (f64, f64),
+    graph_zoom: f64,
     runtime: RuntimeProfile,
     search_input: TextArea<'static>,
     search_mode: &'static str,
@@ -147,6 +199,7 @@ pub struct App {
     message: String,
     tick: u64,
     motion: bool,
+    theme_light: bool,
     nerd_icons: bool,
     help: OverlayState,
     effects: EffectManager<&'static str>,
@@ -170,6 +223,16 @@ impl App {
         let files = storage.list_files()?.len();
         let edges = storage.list_edges()?.len();
         let graph = graph_snapshot(&storage, 220)?;
+        let settings = findex_core::settings::load_or_default(&db_path);
+        let theme_light = match settings.ui.theme {
+            findex_core::settings::ThemePreference::Light => true,
+            findex_core::settings::ThemePreference::Dark => false,
+            findex_core::settings::ThemePreference::System => std::env::var("COLORFGBG")
+                .ok()
+                .and_then(|value| value.rsplit(';').next()?.parse::<u8>().ok())
+                .is_some_and(|background| background >= 7),
+        };
+        nord::set_light(theme_light);
         let index_root = storage
             .get_metadata::<String>("index:root")?
             .map(PathBuf::from);
@@ -200,6 +263,11 @@ impl App {
             files,
             edges,
             graph,
+            graph_selected: 0,
+            graph_hops: 0,
+            graph_edge_filter: None,
+            graph_pan: (0.0, 0.0),
+            graph_zoom: 1.0,
             runtime,
             search_input,
             search_mode: "hybrid",
@@ -217,7 +285,8 @@ impl App {
             logo: None,
             message: "index ready".to_string(),
             tick: 0,
-            motion: std::env::var("FINDEX_TUI_MOTION").as_deref() != Ok("0"),
+            motion: settings.ui.motion && std::env::var("FINDEX_TUI_MOTION").as_deref() != Ok("0"),
+            theme_light,
             nerd_icons: std::env::var("FINDEX_TUI_ICONS").as_deref() != Ok("ascii"),
             help: OverlayState::new()
                 .with_duration(Duration::from_millis(140))
@@ -376,6 +445,77 @@ impl App {
             return Ok(false);
         }
 
+        if self.view == View::Graph {
+            let handled = match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !self.graph.nodes.is_empty() {
+                        self.graph_selected = (self.graph_selected + 1) % self.graph.nodes.len();
+                    }
+                    true
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if !self.graph.nodes.is_empty() {
+                        self.graph_selected = self
+                            .graph_selected
+                            .checked_sub(1)
+                            .unwrap_or(self.graph.nodes.len() - 1);
+                    }
+                    true
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.graph_pan.0 -= 0.08 / self.graph_zoom;
+                    true
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    self.graph_pan.0 += 0.08 / self.graph_zoom;
+                    true
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    self.graph_zoom = (self.graph_zoom * 1.2).min(4.0);
+                    true
+                }
+                KeyCode::Char('-') => {
+                    self.graph_zoom = (self.graph_zoom / 1.2).max(0.4);
+                    true
+                }
+                KeyCode::Char('[') => {
+                    self.graph_hops = self.graph_hops.saturating_sub(1);
+                    true
+                }
+                KeyCode::Char(']') => {
+                    self.graph_hops = (self.graph_hops + 1).min(4);
+                    true
+                }
+                KeyCode::Char('e') => {
+                    self.cycle_graph_edge_filter();
+                    true
+                }
+                KeyCode::Char('f') => {
+                    self.graph_pan = (0.0, 0.0);
+                    self.graph_zoom = 1.0;
+                    true
+                }
+                KeyCode::Char(' ') => {
+                    self.motion = !self.motion;
+                    self.message = if self.motion {
+                        "graph motion enabled"
+                    } else {
+                        "graph motion paused"
+                    }
+                    .to_string();
+                    true
+                }
+                KeyCode::Enter => {
+                    self.inspect_graph_selected(storage)?;
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                return Ok(false);
+            }
+        }
+
         match key.code {
             KeyCode::Esc => return Ok(true),
             KeyCode::Char('1') => self.change_view(View::Dashboard),
@@ -392,6 +532,7 @@ impl App {
             KeyCode::Char('u') if self.available_update.is_some() => {
                 self.update_prompt = true;
             }
+            KeyCode::Char('t') => self.toggle_theme(),
             _ => {}
         }
         Ok(false)
@@ -405,7 +546,7 @@ impl App {
         if self.motion {
             self.effects.add_unique_effect(
                 "view",
-                fx::fade_from_fg(nord::BG, (140, Interpolation::CubicOut)),
+                fx::fade_from_fg(nord::bg(), (140, Interpolation::CubicOut)),
             );
         }
     }
@@ -419,6 +560,25 @@ impl App {
                 .position(ToastPosition::BottomRight),
         );
         self.toast_until = Some(Instant::now() + Duration::from_secs(3));
+    }
+
+    fn toggle_theme(&mut self) {
+        self.theme_light = !self.theme_light;
+        nord::set_light(self.theme_light);
+        let mut settings = findex_core::settings::load_or_default(&self.db_path);
+        settings.ui.theme = if self.theme_light {
+            findex_core::settings::ThemePreference::Light
+        } else {
+            findex_core::settings::ThemePreference::Dark
+        };
+        match findex_core::settings::save(&self.db_path, settings) {
+            Ok(_) => {
+                self.message = format!("{} theme", if self.theme_light { "light" } else { "dark" });
+            }
+            Err(error) => {
+                self.message = format!("theme changed for this run; save failed: {error}")
+            }
+        }
     }
 
     fn start_reindex(&mut self) {
@@ -609,6 +769,21 @@ impl App {
         else {
             return Ok(());
         };
+        let symbol = symbol.clone();
+        self.inspect_symbol(storage, &symbol)
+    }
+
+    fn inspect_graph_selected(&mut self, storage: &Storage) -> anyhow::Result<()> {
+        let Some(symbol) = self.graph.nodes.get(self.graph_selected) else {
+            return Ok(());
+        };
+        let Some(symbol) = storage.get_symbol(&symbol.id)? else {
+            return Ok(());
+        };
+        self.inspect_symbol(storage, &symbol)
+    }
+
+    fn inspect_symbol(&mut self, storage: &Storage, symbol: &Symbol) -> anyhow::Result<()> {
         let report = impact_analysis(storage, &symbol.id)?;
         self.inspector = format!(
             "{} {}\n\n{}\n{}:{}-{}\n\nRISK  {:.1}/100{}\nIN    {}\nOUT   {}\nFILES {}\n\nCALLERS\n{}\n\nCALLEES\n{}",
@@ -645,9 +820,27 @@ impl App {
         Ok(())
     }
 
+    fn cycle_graph_edge_filter(&mut self) {
+        self.graph_edge_filter = match self.graph_edge_filter {
+            None => Some(EdgeType::Calls),
+            Some(EdgeType::Calls) => Some(EdgeType::Imports),
+            Some(EdgeType::Imports) => Some(EdgeType::References),
+            Some(EdgeType::References) => Some(EdgeType::Inherits),
+            Some(EdgeType::Inherits) => Some(EdgeType::Contains),
+            Some(EdgeType::Contains) => Some(EdgeType::Defines),
+            Some(EdgeType::Defines) => None,
+        };
+        self.message = format!(
+            "graph edges: {}",
+            self.graph_edge_filter
+                .map(|kind| format!("{kind:?}"))
+                .unwrap_or_else(|| "all".to_string())
+        );
+    }
+
     fn draw(&mut self, frame: &mut Frame) {
         frame.render_widget(
-            Block::default().style(Style::default().bg(nord::BG)),
+            Block::default().style(Style::default().bg(nord::bg())),
             frame.area(),
         );
         let rows = Layout::vertical([
@@ -699,11 +892,11 @@ impl App {
                 Span::styled(
                     format!(" {} FINDEX ", icon(self.nerd_icons, "󰒋", "F")),
                     Style::default()
-                        .fg(nord::BRIGHT)
+                        .fg(nord::bright())
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("LOCAL CODE GRAPH", Style::default().fg(nord::CYAN)),
-                Span::styled(format!(" {pulse} "), Style::default().fg(nord::GREEN)),
+                Span::styled("LOCAL CODE GRAPH", Style::default().fg(nord::cyan())),
+                Span::styled(format!(" {pulse} "), Style::default().fg(nord::green())),
                 Span::styled(
                     format!(
                         "{} files  {} symbols  {} edges",
@@ -711,7 +904,7 @@ impl App {
                         self.symbols.len(),
                         self.edges
                     ),
-                    Style::default().fg(nord::TEXT),
+                    Style::default().fg(nord::text()),
                 ),
             ])),
             rows[0],
@@ -725,9 +918,13 @@ impl App {
             "6 runtime",
         ];
         let tabs = TabNav::new(&labels, self.view as usize)
-            .style(Style::default().fg(nord::TEXT))
-            .highlight_style(Style::default().fg(nord::CYAN).add_modifier(Modifier::BOLD))
-            .border_style(Style::default().fg(nord::BORDER))
+            .style(Style::default().fg(nord::text()))
+            .highlight_style(
+                Style::default()
+                    .fg(nord::cyan())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .border_style(Style::default().fg(nord::border()))
             .indicator(Some(icon(self.nerd_icons, "󰅂", ">")));
         frame.render_widget(tabs, rows[1]);
     }
@@ -741,7 +938,7 @@ impl App {
             frame.render_widget(
                 BigText::builder()
                     .pixel_size(PixelSize::HalfHeight)
-                    .style(Style::default().fg(nord::CYAN))
+                    .style(Style::default().fg(nord::cyan()))
                     .centered()
                     .lines(vec!["FINDEX".into()])
                     .build(),
@@ -763,7 +960,7 @@ impl App {
         frame.render_widget(
             Gauge::default()
                 .block(panel(" index topology "))
-                .gauge_style(Style::default().fg(nord::CYAN).bg(nord::PANEL_ALT))
+                .gauge_style(Style::default().fg(nord::cyan()).bg(nord::panel_alt()))
                 .ratio(graph_health)
                 .label(format!("{:.0}% connected", graph_health * 100.0)),
             left[0],
@@ -783,10 +980,10 @@ impl App {
             });
         frame.render_widget(
             Paragraph::new(vec![
-                metric_line("God nodes", categories[0], nord::RED),
-                metric_line("UI nodes", categories[1], nord::BLUE),
-                metric_line("API nodes", categories[2], nord::GREEN),
-                metric_line("Code nodes", categories[3], nord::PURPLE),
+                metric_line("God nodes", categories[0], nord::red()),
+                metric_line("UI nodes", categories[1], nord::blue()),
+                metric_line("API nodes", categories[2], nord::green()),
+                metric_line("Code nodes", categories[3], nord::purple()),
             ])
             .block(panel(" graph classes ")),
             left[1],
@@ -795,7 +992,7 @@ impl App {
             Sparkline::default()
                 .block(panel(" process memory · MiB "))
                 .data(self.memory_history.iter().copied().collect::<Vec<_>>())
-                .style(Style::default().fg(nord::GREEN)),
+                .style(Style::default().fg(nord::green())),
             right[0],
         );
         let merkle = format!(
@@ -807,7 +1004,7 @@ impl App {
         );
         frame.render_widget(
             Paragraph::new(merkle)
-                .style(Style::default().fg(nord::TEXT))
+                .style(Style::default().fg(nord::text()))
                 .block(panel(" retrieval capabilities ")),
             right[1],
         );
@@ -817,7 +1014,7 @@ impl App {
         let area = centered_rect(44, 56, frame.area());
         frame.render_widget(Clear, area);
         frame.render_widget(
-            panel(" updating index ").border_style(Style::default().fg(nord::CYAN)),
+            panel(" updating index ").border_style(Style::default().fg(nord::cyan())),
             area,
         );
         if area.width < crate::ingest_sprite::WIDTH + 4
@@ -854,7 +1051,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(format!("{stage}\n{:.1}s elapsed", elapsed.as_secs_f32()))
                 .centered()
-                .style(Style::default().fg(nord::TEXT)),
+                .style(Style::default().fg(nord::text())),
             text_area,
         );
     }
@@ -869,9 +1066,9 @@ impl App {
         self.search_input
             .set_block(panel(format!(" search · {state} · F2 mode ")));
         self.search_input
-            .set_style(Style::default().fg(nord::BRIGHT));
+            .set_style(Style::default().fg(nord::bright()));
         self.search_input
-            .set_cursor_style(Style::default().fg(nord::BG).bg(nord::CYAN));
+            .set_cursor_style(Style::default().fg(nord::bg()).bg(nord::cyan()));
         frame.render_widget(&self.search_input, rows[0]);
         let columns = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
             .split(rows[1]);
@@ -880,15 +1077,18 @@ impl App {
             .iter()
             .map(|(symbol, score)| {
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:>5.2} ", score), Style::default().fg(nord::CYAN)),
+                    Span::styled(
+                        format!("{:>5.2} ", score),
+                        Style::default().fg(nord::cyan()),
+                    ),
                     Span::styled(
                         format!("{:<10}", symbol.kind.to_ascii_lowercase()),
                         Style::default().fg(kind_color(&symbol.kind)),
                     ),
-                    Span::styled(symbol.name.clone(), Style::default().fg(nord::BRIGHT)),
+                    Span::styled(symbol.name.clone(), Style::default().fg(nord::bright())),
                     Span::styled(
                         format!("  {}:{}", short_path(&symbol.file_path), symbol.start_line),
-                        Style::default().fg(nord::BORDER),
+                        Style::default().fg(nord::border()),
                     ),
                 ]))
             })
@@ -896,7 +1096,7 @@ impl App {
         frame.render_stateful_widget(
             List::new(items)
                 .block(panel(format!(" results · {} ", self.search_results.len())))
-                .highlight_style(Style::default().fg(nord::BG).bg(nord::BLUE))
+                .highlight_style(Style::default().fg(nord::bg()).bg(nord::blue()))
                 .highlight_symbol("▌"),
             columns[0],
             &mut self.search_state,
@@ -911,38 +1111,84 @@ impl App {
         frame.render_widget(
             Paragraph::new(preview)
                 .wrap(Wrap { trim: false })
-                .style(Style::default().fg(nord::TEXT))
+                .style(Style::default().fg(nord::text()))
                 .block(panel(" source preview ")),
             columns[1],
         );
     }
 
     fn draw_graph(&self, frame: &mut Frame, area: Rect) {
-        let node_count = self.graph.nodes.len().max(1);
-        let positions: HashMap<_, _> = self
-            .graph
+        let graph = &self.graph;
+        let selected = graph.nodes.get(self.graph_selected);
+        let selected_id = selected.map(|node| node.id.as_str());
+        let filtered_links: Vec<_> = graph
+            .links
+            .iter()
+            .filter(|link| self.graph_edge_filter.is_none_or(|kind| link.kind == kind))
+            .collect();
+        let visible_ids: HashSet<&str> =
+            if let (Some(seed), true) = (selected_id, self.graph_hops > 0) {
+                let mut visible = HashSet::from([seed]);
+                let mut frontier = HashSet::from([seed]);
+                for _ in 0..self.graph_hops {
+                    let mut next = HashSet::new();
+                    for link in &filtered_links {
+                        if frontier.contains(link.source.as_str()) && visible.insert(&link.target) {
+                            next.insert(link.target.as_str());
+                        }
+                        if frontier.contains(link.target.as_str()) && visible.insert(&link.source) {
+                            next.insert(link.source.as_str());
+                        }
+                    }
+                    frontier = next;
+                }
+                visible
+            } else {
+                graph.nodes.iter().map(|node| node.id.as_str()).collect()
+            };
+        let visible_nodes: Vec<_> = graph
             .nodes
+            .iter()
+            .filter(|node| visible_ids.contains(node.id.as_str()))
+            .collect();
+        let node_count = visible_nodes.len().max(1);
+        let phase = if self.motion {
+            self.tick as f64 * 0.0025
+        } else {
+            0.0
+        };
+        let positions: HashMap<_, _> = visible_nodes
             .iter()
             .enumerate()
             .map(|(index, node)| {
                 let ring = 0.25 + 0.68 * ((index % 4 + 1) as f64 / 4.0);
-                let angle = index as f64 / node_count as f64 * TAU * 7.0;
+                let angle = index as f64 / node_count as f64 * TAU * 7.0 + phase;
                 (node.id.as_str(), (ring * angle.cos(), ring * angle.sin()))
             })
             .collect();
-        let graph = &self.graph;
+        let half_span = 1.1 / self.graph_zoom;
+        let edge_label = self
+            .graph_edge_filter
+            .map(|kind| format!("{kind:?}"))
+            .unwrap_or_else(|| "all".to_string());
         let canvas = Canvas::default()
             .block(panel(format!(
-                " 3D-ready topology · {} nodes · {} links{} ",
-                graph.nodes.len(),
-                graph.links.len(),
-                if graph.truncated { " · bounded" } else { "" }
+                " topology · {} nodes · {} edges · {} · {} hops · +/- zoom · arrows pan{} ",
+                visible_nodes.len(),
+                filtered_links.len(),
+                edge_label,
+                if self.graph_hops == 0 {
+                    "all".to_string()
+                } else {
+                    self.graph_hops.to_string()
+                },
+                if graph.truncated { " · bounded" } else { "" },
             )))
             .marker(Marker::Braille)
-            .x_bounds([-1.1, 1.1])
-            .y_bounds([-1.1, 1.1])
+            .x_bounds([self.graph_pan.0 - half_span, self.graph_pan.0 + half_span])
+            .y_bounds([self.graph_pan.1 - half_span, self.graph_pan.1 + half_span])
             .paint(|context| {
-                for link in graph.links.iter().take(800) {
+                for link in filtered_links.iter().take(800) {
                     if let (Some(source), Some(target)) = (
                         positions.get(link.source.as_str()),
                         positions.get(link.target.as_str()),
@@ -952,17 +1198,27 @@ impl App {
                             y1: source.1,
                             x2: target.0,
                             y2: target.1,
-                            color: nord::BORDER,
+                            color: if selected_id
+                                .is_some_and(|id| link.source == id || link.target == id)
+                            {
+                                nord::cyan()
+                            } else {
+                                nord::border()
+                            },
                         });
                     }
                 }
-                for node in &graph.nodes {
+                for node in &visible_nodes {
                     if let Some((x, y)) = positions.get(node.id.as_str()) {
-                        let marker = match node.category.as_str() {
-                            "god" => "●",
-                            "ui" => "◆",
-                            "api" => "■",
-                            _ => "·",
+                        let marker = if selected_id == Some(node.id.as_str()) {
+                            "◉"
+                        } else {
+                            match node.category.as_str() {
+                                "god" => "●",
+                                "ui" => "◆",
+                                "api" => "■",
+                                _ => "·",
+                            }
                         };
                         context.print(
                             *x,
@@ -972,17 +1228,38 @@ impl App {
                                 Style::default().fg(category_color(&node.category)),
                             ),
                         );
-                        if node.degree >= 8 {
+                        if node.degree >= 8 || selected_id == Some(node.id.as_str()) {
                             context.print(
                                 *x + 0.018,
                                 *y,
-                                Span::styled(node.name.clone(), Style::default().fg(nord::TEXT)),
+                                Span::styled(node.name.clone(), Style::default().fg(nord::text())),
                             );
                         }
                     }
                 }
             });
         frame.render_widget(canvas, area);
+        if let Some(node) = selected {
+            let width = area.width.clamp(24, 52);
+            let info_area = Rect::new(
+                area.right().saturating_sub(width + 1),
+                area.bottom().saturating_sub(5),
+                width,
+                4,
+            );
+            frame.render_widget(Clear, info_area);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{} · degree {}\n{}",
+                    node.name,
+                    node.degree,
+                    short_path(&node.file_path)
+                ))
+                .style(Style::default().fg(nord::text()))
+                .block(panel(" selected · j/k cycle · Enter inspect ")),
+                info_area,
+            );
+        }
     }
 
     fn draw_query(&mut self, frame: &mut Frame, area: Rect) {
@@ -990,9 +1267,9 @@ impl App {
         self.query_input
             .set_block(panel(" manual graph query · Enter run "));
         self.query_input
-            .set_style(Style::default().fg(nord::BRIGHT));
+            .set_style(Style::default().fg(nord::bright()));
         self.query_input
-            .set_cursor_style(Style::default().fg(nord::BG).bg(nord::CYAN));
+            .set_cursor_style(Style::default().fg(nord::bg()).bg(nord::cyan()));
         frame.render_widget(&self.query_input, rows[0]);
         let result_block = panel(" result · PageUp/PageDown scroll ");
         let result_area = result_block.inner(rows[1]);
@@ -1002,7 +1279,7 @@ impl App {
         let mut scroll = ScrollView::new(content_size);
         scroll.render_widget(
             Paragraph::new(&*self.query_result)
-                .style(Style::default().fg(nord::TEXT))
+                .style(Style::default().fg(nord::text()))
                 .wrap(Wrap { trim: false }),
             Rect::new(0, 0, content_size.width, content_size.height),
         );
@@ -1014,7 +1291,7 @@ impl App {
             .split(area);
         frame.render_widget(
             Paragraph::new(&*self.inspector)
-                .style(Style::default().fg(nord::TEXT))
+                .style(Style::default().fg(nord::text()))
                 .wrap(Wrap { trim: false })
                 .block(panel(" impact inspector ")),
             columns[0],
@@ -1022,7 +1299,7 @@ impl App {
         let Some(report) = &self.impact_report else {
             frame.render_widget(
                 Paragraph::new("Inspect a search result to build its relationship tree.")
-                    .style(Style::default().fg(nord::BORDER))
+                    .style(Style::default().fg(nord::border()))
                     .block(panel(" relationship tree ")),
                 columns[1],
             );
@@ -1068,8 +1345,8 @@ impl App {
         if let Ok(tree) = Tree::new(&items) {
             frame.render_stateful_widget(
                 tree.block(panel(" relationship tree "))
-                    .style(Style::default().fg(nord::TEXT))
-                    .highlight_style(Style::default().fg(nord::BG).bg(nord::BLUE))
+                    .style(Style::default().fg(nord::text()))
+                    .highlight_style(Style::default().fg(nord::bg()).bg(nord::blue()))
                     .highlight_symbol("▌ ")
                     .node_closed_symbol("+ ")
                     .node_open_symbol("- "),
@@ -1099,7 +1376,7 @@ impl App {
                 .block(panel(" system RAM "))
                 .ratio(ram_ratio.clamp(0.0, 1.0))
                 .label(format!("{:.1}% used", ram_ratio * 100.0))
-                .gauge_style(Style::default().fg(nord::BLUE).bg(nord::PANEL_ALT)),
+                .gauge_style(Style::default().fg(nord::blue()).bg(nord::panel_alt())),
             left[0],
         );
         let budget_ratio = if self.runtime.memory_budget_bytes == 0 {
@@ -1119,11 +1396,11 @@ impl App {
                 .gauge_style(
                     Style::default()
                         .fg(if budget_ratio > 0.85 {
-                            nord::RED
+                            nord::red()
                         } else {
-                            nord::GREEN
+                            nord::green()
                         })
-                        .bg(nord::PANEL_ALT),
+                        .bg(nord::panel_alt()),
                 ),
             left[1],
         );
@@ -1136,7 +1413,7 @@ impl App {
                 self.runtime.vector_quantization,
                 self.runtime.cuda_compiled
             ))
-            .style(Style::default().fg(nord::TEXT))
+            .style(Style::default().fg(nord::text()))
             .block(panel(" compute policy ")),
             left[2],
         );
@@ -1165,7 +1442,7 @@ impl App {
             .split(columns[1]);
         frame.render_widget(
             Paragraph::new(gpu_text)
-                .style(Style::default().fg(nord::TEXT))
+                .style(Style::default().fg(nord::text()))
                 .wrap(Wrap { trim: false })
                 .block(panel(" GPU telemetry · r refresh ")),
             right[0],
@@ -1173,10 +1450,10 @@ impl App {
         frame.render_widget(
             TuiLoggerWidget::default()
                 .block(panel(" diagnostics "))
-                .style(Style::default().fg(nord::TEXT))
-                .style_info(Style::default().fg(nord::CYAN))
-                .style_warn(Style::default().fg(nord::YELLOW))
-                .style_error(Style::default().fg(nord::RED))
+                .style(Style::default().fg(nord::text()))
+                .style_info(Style::default().fg(nord::cyan()))
+                .style_warn(Style::default().fg(nord::yellow()))
+                .style_error(Style::default().fg(nord::red()))
                 .output_timestamp(Some("%H:%M:%S".to_string()))
                 .output_level(Some(TuiLoggerLevelOutput::Abbreviated))
                 .output_target(false)
@@ -1191,15 +1468,15 @@ impl App {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     format!(" {} ", self.message),
-                    Style::default().fg(nord::GREEN),
+                    Style::default().fg(nord::green()),
                 ),
                 Span::styled(
                     if self.available_update.is_some() {
-                        " F8 update  Tab views  r refresh  ? help  Ctrl+Q quit "
+                        " F8 update  Tab views  t theme  ? help  Ctrl+Q quit "
                     } else {
-                        " Tab views  r reindex/refresh  Enter inspect/run  ? help  Ctrl+Q quit "
+                        " Tab views  t theme  Enter inspect/run  ? help  Ctrl+Q quit "
                     },
-                    Style::default().fg(nord::BORDER),
+                    Style::default().fg(nord::border()),
                 ),
             ])),
             area,
@@ -1211,19 +1488,19 @@ impl App {
             .width(Constraint::Percentage(62))
             .height(Constraint::Percentage(62))
             .slide(Slide::Bottom)
-            .backdrop(Backdrop::new(nord::BG).fg(nord::BORDER))
-            .bg(nord::PANEL)
+            .backdrop(Backdrop::new(nord::bg()).fg(nord::border()))
+            .bg(nord::panel())
             .block(
                 panel(" keyboard + resource controls ")
-                    .border_style(Style::default().fg(nord::CYAN)),
+                    .border_style(Style::default().fg(nord::cyan())),
             );
         frame.render_stateful_widget(overlay, frame.area(), &mut self.help);
         if let Some(area) = self.help.inner_area() {
             frame.render_widget(
             Paragraph::new(
-                "1–6 / Tab    switch views\n/             jump to search\nF2            hybrid → lexical → semantic\nF8            review a signed update\n↑ ↓           select search result\nEnter         inspect result or execute query\nr             reindex (dashboard) or refresh GPU probes (runtime)\n?             close this help\nCtrl+Q / Esc  quit\n\nEnvironment\nFINDEX_TUI_MOTION=0      disable motion\nFINDEX_TUI_ICONS=ascii   glyph fallback\nFINDEX_MEMORY_BUDGET_MB  hard policy target\nFINDEX_RAYON_THREADS     worker count",
+                "1–6 / Tab    switch views\n/             jump to search\nF2            hybrid → lexical → semantic\nF8            review a signed update\nt             toggle persisted light/dark theme\n↑ ↓           select search result\nEnter         inspect result or execute query\nr             reindex (dashboard) or refresh GPU probes (runtime)\n\nGraph view\nj/k           select node\nh/l or ←/→    pan\n+/-           zoom\n[ / ]         whole graph or 1–4 hop neighborhood\ne             cycle typed edge filter\nSpace         pause/resume layout motion\nf             fit graph\nEnter         inspect selected node\n\n?             close this help\nCtrl+Q / Esc  quit\n\nEnvironment\nFINDEX_TUI_MOTION=0      disable motion\nFINDEX_TUI_ICONS=ascii   glyph fallback\nFINDEX_MEMORY_BUDGET_MB  hard policy target\nFINDEX_RAYON_THREADS     worker count",
             )
-            .style(Style::default().fg(nord::TEXT))
+            .style(Style::default().fg(nord::text()))
             .wrap(Wrap { trim: false }),
             area,
             );
@@ -1243,11 +1520,11 @@ impl App {
                 update.target,
                 update.notes.trim()
             ))
-            .style(Style::default().fg(nord::TEXT))
+            .style(Style::default().fg(nord::text()))
             .wrap(Wrap { trim: false })
             .block(
                 panel(" signed update · confirmation required ")
-                    .border_style(Style::default().fg(nord::GREEN)),
+                    .border_style(Style::default().fg(nord::green())),
             ),
             area,
         );
@@ -1276,8 +1553,8 @@ fn panel(title: impl Into<Line<'static>>) -> Block<'static> {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(nord::token("border.unfocused")))
-        .style(Style::default().bg(nord::PANEL))
-        .title(title.into().style(Style::default().fg(nord::CYAN)))
+        .style(Style::default().bg(nord::panel()))
+        .title(title.into().style(Style::default().fg(nord::cyan())))
 }
 
 fn metric_line(label: &str, value: usize, color: Color) -> Line<'static> {
@@ -1286,7 +1563,7 @@ fn metric_line(label: &str, value: usize, color: Color) -> Line<'static> {
             format!("{value:>6}"),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("  {label}"), Style::default().fg(nord::TEXT)),
+        Span::styled(format!("  {label}"), Style::default().fg(nord::text())),
     ])
 }
 
@@ -1301,22 +1578,22 @@ fn icon<'a>(nerd: bool, nerd_icon: &'a str, fallback: &'a str) -> &'a str {
 fn kind_color(kind: &str) -> Color {
     let kind = kind.to_ascii_lowercase();
     if kind.contains("component") || kind.contains("widget") {
-        nord::BLUE
+        nord::blue()
     } else if kind.contains("function") || kind.contains("method") {
-        nord::GREEN
+        nord::green()
     } else if kind.contains("class") || kind.contains("struct") || kind.contains("interface") {
-        nord::PURPLE
+        nord::purple()
     } else {
-        nord::YELLOW
+        nord::yellow()
     }
 }
 
 fn category_color(category: &str) -> Color {
     match category {
-        "god" => nord::RED,
-        "ui" => nord::BLUE,
-        "api" => nord::GREEN,
-        _ => nord::PURPLE,
+        "god" => nord::red(),
+        "ui" => nord::blue(),
+        "api" => nord::green(),
+        _ => nord::purple(),
     }
 }
 
@@ -1329,13 +1606,16 @@ fn highlighted_source(symbol: &Symbol, root: Option<&std::path::Path>) -> Vec<Li
     }
     let Ok(source) = std::fs::read_to_string(&path) else {
         return vec![
-            Line::styled(symbol.signature.clone(), Style::default().fg(nord::BRIGHT)),
+            Line::styled(
+                symbol.signature.clone(),
+                Style::default().fg(nord::bright()),
+            ),
             Line::styled(
                 format!(
                     "{}:{}-{}",
                     symbol.file_path, symbol.start_line, symbol.end_line
                 ),
-                Style::default().fg(nord::BORDER),
+                Style::default().fg(nord::border()),
             ),
         ];
     };
@@ -1377,7 +1657,7 @@ fn highlighted_source(symbol: &Symbol, root: Option<&std::path::Path>) -> Vec<Li
             .unwrap_or_default();
         let mut spans = vec![Span::styled(
             format!("{:>5} ", start + offset),
-            Style::default().fg(nord::BORDER),
+            Style::default().fg(nord::border()),
         )];
         spans.extend(ranges.into_iter().map(|(style, text)| {
             let mut terminal_style = Style::default().fg(Color::Rgb(

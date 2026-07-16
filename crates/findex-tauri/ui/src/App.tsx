@@ -1,15 +1,15 @@
 import { FormEvent, lazy, Suspense, useEffect, useState } from 'react';
 import {
   Activity, ArrowDownToLine, Braces, Boxes, Cpu, Database, FileCode2, GitBranch,
-  Network, Search, ShieldCheck, SquareTerminal, Workflow, X
+  Moon, Network, RotateCcw, Search, Settings2, ShieldCheck, SquareTerminal, Sun, Workflow, X
 } from 'lucide-react';
 import { api } from './api';
 import type {
-  ArchitectureOverview, AstNode, AstOutline, DesktopUpdateInfo, GraphNode, GraphSnapshot, ImpactReport,
-  RuntimeProfile, SearchResult, Stats
+  ArchitectureOverview, AstNode, AstOutline, DesktopUpdateInfo, FindexSettings, GraphNode, GraphSnapshot, ImpactReport,
+  RuntimeProfile, SearchResult, Stats, ThemePreference
 } from './types';
 
-type View = 'graph' | 'architecture' | 'search' | 'ast' | 'query' | 'runtime';
+type View = 'graph' | 'architecture' | 'search' | 'ast' | 'query' | 'runtime' | 'settings';
 
 const EMPTY_GRAPH: GraphSnapshot = { nodes: [], links: [], truncated: false };
 const COLORS = { god: '#f85149', ui: '#58a6ff', api: '#3fb950', code: '#a371f7' } as const;
@@ -21,6 +21,8 @@ function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [runtime, setRuntime] = useState<RuntimeProfile | null>(null);
   const [architecture, setArchitecture] = useState<ArchitectureOverview | null>(null);
+  const [settings, setSettings] = useState<FindexSettings | null>(null);
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [impact, setImpact] = useState<ImpactReport | null>(null);
   const [searchInput, setSearchInput] = useState('');
@@ -36,15 +38,50 @@ function App() {
   const [installingUpdate, setInstallingUpdate] = useState(false);
 
   useEffect(() => {
-    Promise.all([api.graph(), api.stats()])
-      .then(([nextGraph, nextStats]) => {
+    Promise.all([api.graph(), api.stats(), api.settings()])
+      .then(([nextGraph, nextStats, nextSettings]) => {
         setGraph(nextGraph);
         setStats(nextStats);
+        setSettings(nextSettings);
         setSelected(nextGraph.nodes[0] ?? null);
       })
       .catch(cause => setError(String(cause)))
       .finally(() => setBusy(false));
   }, []);
+
+  const resolvedTheme = settings?.ui.theme === 'light' || settings?.ui.theme === 'dark'
+    ? settings.ui.theme
+    : systemDark ? 'dark' : 'light';
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.style.colorScheme = resolvedTheme;
+  }, [resolvedTheme]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const update = () => setSystemDark(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  async function saveSettings(next: FindexSettings) {
+    setBusy(true);
+    try {
+      setSettings(await api.saveSettings(next));
+    } catch (cause) {
+      setError(`Settings were not saved: ${String(cause)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function cycleTheme() {
+    if (!settings) return;
+    const order: ThemePreference[] = ['system', 'light', 'dark'];
+    const theme = order[(order.indexOf(settings.ui.theme) + 1) % order.length];
+    void saveSettings({ ...settings, ui: { ...settings.ui, theme } });
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -129,6 +166,9 @@ function App() {
           <button type="submit" className="command-submit" aria-label="Run search">Enter</button>
         </form>
         {availableUpdate && <button className="update-chip" onClick={() => setShowUpdate(true)}><ArrowDownToLine size={13} />Update {availableUpdate.version}</button>}
+        <button className="icon-button" onClick={cycleTheme} title={`Theme: ${settings?.ui.theme ?? 'system'}`} aria-label="Cycle color theme">
+          {resolvedTheme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}
+        </button>
         <div className="top-metrics">
           <span><Database size={13} />{stats?.files.toLocaleString() ?? '—'} files</span>
           <span><GitBranch size={13} />{stats?.edges.toLocaleString() ?? '—'} edges</span>
@@ -144,13 +184,14 @@ function App() {
         <NavButton active={view === 'query'} label="Query" onClick={() => setView('query')}><SquareTerminal /></NavButton>
         <div className="rail-spacer" />
         <NavButton active={view === 'runtime'} label="Runtime" onClick={() => setView('runtime')}><Cpu /></NavButton>
+        <NavButton active={view === 'settings'} label="Settings" onClick={() => setView('settings')}><Settings2 /></NavButton>
       </nav>
 
       <main className="workspace">
         <section className="content-panel">
           {view === 'graph' && (
             <Suspense fallback={<Empty title="Loading WebGL topology" detail="The 3D engine is code-split so non-graph views start without this cost." />}>
-              <GraphCanvas graph={graph} selected={selected} onSelect={setSelected} />
+              <GraphCanvas graph={graph} selected={selected} onSelect={setSelected} theme={resolvedTheme} settings={settings?.ui} />
             </Suspense>
           )}
 
@@ -184,6 +225,8 @@ function App() {
           )}
 
           {view === 'runtime' && <RuntimeView runtime={runtime} />}
+
+          {view === 'settings' && settings && <SettingsView settings={settings} onSave={saveSettings} busy={busy} />}
         </section>
 
         <aside className="inspector-panel">
@@ -256,10 +299,89 @@ function RuntimeView({ runtime }: { runtime: RuntimeProfile | null }) {
     <div className="runtime-grid">
       <Meter label="System RAM" value={ramUsed} detail={`${gib(runtime.available_memory_bytes)} GiB available`} />
       <Meter label="Findex budget" value={budgetUsed} detail={`${mib(runtime.process_memory_bytes)} / ${mib(runtime.memory_budget_bytes)} MiB`} warning={budgetUsed > .85} />
-      <div className="runtime-card"><h2>Compute policy</h2><dl><div><dt>Logical CPUs</dt><dd>{runtime.logical_cpus}</dd></div><div><dt>Rayon workers</dt><dd>{runtime.rayon_threads}</dd></div><div><dt>ONNX workers</dt><dd>{runtime.onnx_intra_threads}</dd></div><div><dt>Model profile</dt><dd>{runtime.model_profile}</dd></div><div><dt>Embedding batch</dt><dd>{runtime.recommended_embedding_batch}</dd></div><div><dt>Vectors</dt><dd>{runtime.vector_quantization}</dd></div><div><dt>CUDA build</dt><dd>{runtime.cuda_compiled ? 'enabled' : 'CPU'}</dd></div></dl></div>
+      <div className="runtime-card"><h2>Compute policy</h2><dl><div><dt>Logical CPUs</dt><dd>{runtime.logical_cpus}</dd></div><div><dt>Rayon workers</dt><dd>{runtime.rayon_threads}</dd></div><div><dt>ONNX workers</dt><dd>{runtime.onnx_intra_threads}</dd></div><div><dt>Device policy</dt><dd>{runtime.compute_device}</dd></div><div><dt>Model profile</dt><dd>{runtime.model_profile}</dd></div><div><dt>Embedding batch</dt><dd>{runtime.recommended_embedding_batch}</dd></div><div><dt>Vectors</dt><dd>{runtime.vector_quantization}</dd></div><div><dt>CUDA build</dt><dd>{runtime.cuda_compiled ? 'enabled' : 'CPU'}</dd></div></dl></div>
       <div className="runtime-card"><h2>GPU</h2>{runtime.gpu_devices.length ? runtime.gpu_devices.map(gpu => <div key={gpu.name} className="gpu"><b>{gpu.name}</b><span>{gpu.used_memory_mib} / {gpu.total_memory_mib} MiB</span><span>{gpu.utilization_percent}% · {gpu.temperature_celsius ?? '—'}°C</span></div>) : <p className="muted">No NVIDIA telemetry. CPU fallback remains available.</p>}</div>
     </div>
   </div>;
+}
+
+function SettingsView({ settings, onSave, busy }: {
+  settings: FindexSettings;
+  onSave: (settings: FindexSettings) => Promise<void>;
+  busy: boolean;
+}) {
+  const [draft, setDraft] = useState(settings);
+  useEffect(() => setDraft(settings), [settings]);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
+  const setIndexing = (key: keyof FindexSettings['indexing'], value: boolean) =>
+    setDraft(current => ({ ...current, indexing: { ...current.indexing, [key]: value } }));
+  const setRetrieval = <K extends keyof FindexSettings['retrieval']>(key: K, value: FindexSettings['retrieval'][K]) =>
+    setDraft(current => ({ ...current, retrieval: { ...current.retrieval, [key]: value } }));
+  const setRuntime = <K extends keyof FindexSettings['runtime']>(key: K, value: FindexSettings['runtime'][K]) =>
+    setDraft(current => ({ ...current, runtime: { ...current.runtime, [key]: value } }));
+  const setUi = <K extends keyof FindexSettings['ui']>(key: K, value: FindexSettings['ui'][K]) =>
+    setDraft(current => ({ ...current, ui: { ...current.ui, [key]: value } }));
+
+  return <div className="scroll-view settings-view">
+    <div className="view-heading">
+      <div><h1>Settings</h1><p>Production controls are persisted beside the index and shared by CLI, TUI, desktop, and MCP.</p></div>
+      <div className="heading-actions">
+        <button disabled={!dirty || busy} onClick={() => setDraft(settings)}><RotateCcw size={14} />Discard</button>
+        <button className="primary" disabled={!dirty || busy} onClick={() => void onSave(draft)}>{busy ? 'Saving…' : 'Save changes'}</button>
+      </div>
+    </div>
+    <div className="settings-grid">
+      <SettingsSection title="Indexing" detail="Disable expensive index stages without installing a different build.">
+        <Toggle label="Lexical index" detail="Tantivy BM25 and trigram-compatible symbol lookup." checked={draft.indexing.lexical_index} onChange={value => setIndexing('lexical_index', value)} />
+        <Toggle label="Semantic index" detail="USearch vectors and ONNX query embedding." checked={draft.indexing.semantic_index} onChange={value => { setIndexing('semantic_index', value); setRetrieval('semantic_search', value); }} />
+        <Toggle label="Exact Stack Graphs" detail="Precise name resolution for supported language packages." checked={draft.indexing.stack_graphs} onChange={value => setIndexing('stack_graphs', value)} />
+        <Toggle label="Incremental watcher" detail="Debounced partial re-indexing after file changes." checked={draft.indexing.watcher} onChange={value => setIndexing('watcher', value)} />
+        <Toggle label="VFS shadowing" detail="Unsaved-buffer overlays and bounded micro-compilation." checked={draft.indexing.vfs_shadowing} onChange={value => setIndexing('vfs_shadowing', value)} />
+        <Toggle label="Trace pinning" detail="Persist execution evidence and taint tags on graph edges." checked={draft.indexing.execution_trace_pinning} onChange={value => setIndexing('execution_trace_pinning', value)} />
+      </SettingsSection>
+
+      <SettingsSection title="Retrieval" detail="Bound candidate work before allocating tokens or model compute.">
+        <Toggle label="Cross-encoder reranking" detail="Rerank only the bounded first-stage pool." checked={draft.retrieval.reranking} onChange={value => setRetrieval('reranking', value)} />
+        <Toggle label="Graph expansion" detail="Pull typed neighbors around top retrieval anchors." checked={draft.retrieval.graph_expansion} onChange={value => setRetrieval('graph_expansion', value)} />
+        <Toggle label="Structural prefetch" detail="Predict likely next context from graph locality." checked={draft.retrieval.structural_prefetch} onChange={value => setRetrieval('structural_prefetch', value)} />
+        <NumberSetting label="Graph hops" value={draft.retrieval.graph_hops} min={0} max={4} onChange={value => setRetrieval('graph_hops', value)} />
+        <NumberSetting label="Candidate pool" value={draft.retrieval.candidate_limit} min={4} max={200} onChange={value => setRetrieval('candidate_limit', value)} />
+        <NumberSetting label="Default token budget" value={draft.retrieval.default_token_budget} min={128} max={32768} step={128} onChange={value => setRetrieval('default_token_budget', value)} />
+      </SettingsSection>
+
+      <SettingsSection title="Compute and memory" detail="CUDA is used only by compatible ONNX builds; CPU fallback remains mandatory.">
+        <SelectSetting label="Compute device" value={draft.runtime.compute_device} options={['auto', 'cpu', 'cuda']} onChange={value => setRuntime('compute_device', value as FindexSettings['runtime']['compute_device'])} />
+        <SelectSetting label="Model profile" value={draft.runtime.model_profile} options={['fast', 'balanced', 'quality']} onChange={value => setRuntime('model_profile', value as FindexSettings['runtime']['model_profile'])} />
+        <NumberSetting label="RAM budget (MiB)" value={draft.runtime.memory_budget_mib} min={256} max={1048576} step={256} onChange={value => setRuntime('memory_budget_mib', value)} />
+        <NumberSetting label="GPU arena limit (MiB)" value={draft.runtime.gpu_memory_limit_mib} min={256} max={1048576} step={256} onChange={value => setRuntime('gpu_memory_limit_mib', value)} />
+        <NumberSetting label="Release models after (seconds)" value={draft.runtime.model_idle_seconds} min={30} max={86400} step={30} onChange={value => setRuntime('model_idle_seconds', value)} />
+        <p className="settings-note">Device changes release active ONNX sessions immediately. A model-profile change takes effect when Findex next creates its model components.</p>
+      </SettingsSection>
+
+      <SettingsSection title="Appearance" detail="GitHub-derived tokens with restrained motion and native system preference.">
+        <SelectSetting label="Theme" value={draft.ui.theme} options={['system', 'light', 'dark']} onChange={value => setUi('theme', value as ThemePreference)} />
+        <Toggle label="Motion" detail="Short state transitions and status animation." checked={draft.ui.motion} onChange={value => setUi('motion', value)} />
+        <Toggle label="Graph particles" detail="Animate only edges adjacent to the selected node." checked={draft.ui.graph_particles} onChange={value => setUi('graph_particles', value)} />
+        <Toggle label="Graph labels" detail="Show detailed hover labels for graph nodes." checked={draft.ui.graph_labels} onChange={value => setUi('graph_labels', value)} />
+      </SettingsSection>
+    </div>
+  </div>;
+}
+
+function SettingsSection({ title, detail, children }: { title: string; detail: string; children: React.ReactNode }) {
+  return <section className="settings-section"><header><h2>{title}</h2><p>{detail}</p></header>{children}</section>;
+}
+
+function Toggle({ label, detail, checked, onChange }: { label: string; detail: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return <label className="setting-row"><span><b>{label}</b><small>{detail}</small></span><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} /></label>;
+}
+
+function NumberSetting({ label, value, min, max, step = 1, onChange }: { label: string; value: number; min: number; max: number; step?: number; onChange: (value: number) => void }) {
+  return <label className="setting-row compact"><span><b>{label}</b></span><input type="number" value={value} min={min} max={max} step={step} onChange={event => onChange(Number(event.target.value))} /></label>;
+}
+
+function SelectSetting({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
+  return <label className="setting-row compact"><span><b>{label}</b></span><select value={value} onChange={event => onChange(event.target.value)}>{options.map(option => <option value={option} key={option}>{option}</option>)}</select></label>;
 }
 
 function Meter({ label, value, detail, warning = false }: { label: string; value: number; detail: string; warning?: boolean }) {

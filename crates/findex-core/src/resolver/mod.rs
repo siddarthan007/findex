@@ -1,6 +1,6 @@
 use crate::skeleton::pagerank::compute_pagerank;
 use crate::storage::{EdgeType, Storage, StorageError, Symbol};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 /// Resolves a reference edge to its most likely definition symbol using proximity and PageRank.
@@ -253,6 +253,149 @@ pub fn expand_context(
     Ok(result)
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RankedContextNeighbor {
+    pub symbol: Symbol,
+    pub score: f32,
+    pub hops: u32,
+    pub relation: EdgeType,
+    pub direction: String,
+    pub evidence: String,
+}
+
+/// Bounded, provenance-aware graph expansion for retrieval. Typed edges,
+/// exact Stack Graph evidence, and execution traces outrank ambiguous parser
+/// references; a logarithmic degree penalty prevents God nodes from flooding
+/// every result set.
+pub fn expand_context_ranked(
+    symbol_id: &str,
+    depth: u32,
+    max_nodes: usize,
+    storage: &Storage,
+) -> Result<Vec<RankedContextNeighbor>, StorageError> {
+    let depth = depth.min(4);
+    let max_nodes = max_nodes.clamp(1, 512);
+    let mut best: HashMap<String, RankedContextNeighbor> = HashMap::new();
+    let mut queue = VecDeque::from([(symbol_id.to_string(), 0_u32, 1.0_f32)]);
+    let mut expanded = HashSet::new();
+
+    while let Some((current_id, hops, current_score)) = queue.pop_front() {
+        if hops >= depth || !expanded.insert((current_id.clone(), hops)) {
+            continue;
+        }
+        let Some(current) = storage.get_symbol(&current_id)? else {
+            continue;
+        };
+        let mut neighbors = Vec::new();
+
+        for edge in storage.get_edges_by_src(&current_id)? {
+            let target = if edge.edge_type == EdgeType::Contains {
+                storage.get_symbol(&edge.dst)?
+            } else {
+                match storage.get_symbol(&edge.dst)? {
+                    Some(symbol) => Some(symbol),
+                    None => resolve_definition(&edge.dst, &current_id, storage)?,
+                }
+            };
+            if let Some(target) = target {
+                neighbors.push((target, edge, "outgoing"));
+            }
+        }
+
+        let mut incoming = storage.get_edges_by_dst(&current_id)?;
+        incoming.extend(storage.get_edges_by_dst(&current.name)?);
+        for edge in incoming {
+            let targets_current = edge.dst == current_id
+                || resolve_definition(&edge.dst, &edge.src, storage)?
+                    .is_some_and(|resolved| resolved.id == current_id);
+            if targets_current {
+                if let Some(source) = storage.get_symbol(&edge.src)? {
+                    neighbors.push((source, edge, "incoming"));
+                }
+            }
+        }
+
+        neighbors.sort_by(|left, right| {
+            edge_priority(&right.1)
+                .partial_cmp(&edge_priority(&left.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        neighbors.truncate(96);
+        for (neighbor, edge, direction) in neighbors {
+            if neighbor.id == symbol_id {
+                continue;
+            }
+            let degree = storage.get_edges_by_src(&neighbor.id)?.len()
+                + storage.get_edges_by_dst(&neighbor.id)?.len()
+                + storage.get_edges_by_dst(&neighbor.name)?.len();
+            let degree_penalty = 1.0 / (1.0 + (degree as f32).ln_1p() * 0.14);
+            let score = current_score * 0.72 * edge_priority(&edge) * degree_penalty;
+            let next_hops = hops + 1;
+            let candidate = RankedContextNeighbor {
+                symbol: neighbor.clone(),
+                score,
+                hops: next_hops,
+                relation: edge.edge_type,
+                direction: direction.to_string(),
+                evidence: edge_evidence(&edge),
+            };
+            let should_replace = best
+                .get(&neighbor.id)
+                .map(|existing| candidate.score > existing.score)
+                .unwrap_or(true);
+            if should_replace {
+                best.insert(neighbor.id.clone(), candidate);
+            }
+            if next_hops < depth && best.len() < max_nodes.saturating_mul(2) {
+                queue.push_back((neighbor.id, next_hops, score));
+            }
+        }
+    }
+
+    let mut ranked: Vec<_> = best.into_values().collect();
+    ranked.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.symbol.id.cmp(&right.symbol.id))
+    });
+    ranked.truncate(max_nodes);
+    Ok(ranked)
+}
+
+fn edge_priority(edge: &crate::storage::Edge) -> f32 {
+    let typed: f32 = match edge.edge_type {
+        EdgeType::Inherits => 1.0,
+        EdgeType::Calls => 0.96,
+        EdgeType::Defines => 0.94,
+        EdgeType::Imports => 0.86,
+        EdgeType::References => 0.78,
+        EdgeType::Contains => 0.74,
+    };
+    let evidence: f32 =
+        if edge.trace_id.is_some() || edge.tags.iter().any(|tag| tag == "execution-trace") {
+            1.12
+        } else if edge.tags.iter().any(|tag| tag == "stack-graphs") {
+            1.08
+        } else {
+            1.0
+        };
+    (typed * evidence).min(1.1_f32)
+}
+
+fn edge_evidence(edge: &crate::storage::Edge) -> String {
+    if let Some(trace_id) = edge.trace_id.as_deref() {
+        format!("execution_trace:{trace_id}")
+    } else if edge.tags.iter().any(|tag| tag == "stack-graphs") {
+        "stack_graph".to_string()
+    } else if edge.tags.is_empty() {
+        "ast_extracted".to_string()
+    } else {
+        edge.tags.join(",")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +453,41 @@ mod tests {
         // Verify expansion
         let expanded = expand_context("src/main.rs#main", 1, &storage).unwrap();
         assert!(expanded.iter().any(|s| s.id == "src/lib.rs#run"));
+    }
+
+    #[test]
+    fn ranked_expansion_preserves_relation_and_trace_evidence() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::open(dir.path().join("db")).unwrap();
+        let root = make_sym("src/main.rs#main", "main", "src/main.rs");
+        let traced = make_sym("src/trace.rs#hot", "hot", "src/trace.rs");
+        let plain = make_sym("src/plain.rs#cold", "cold", "src/plain.rs");
+        for symbol in [&root, &traced, &plain] {
+            storage.save_symbol(symbol).unwrap();
+        }
+        storage
+            .save_edges_batch(&[
+                Edge {
+                    src: root.id.clone(),
+                    dst: traced.id.clone(),
+                    edge_type: EdgeType::Calls,
+                    trace_id: Some("request-42".to_string()),
+                    tags: vec!["execution-trace".to_string()],
+                },
+                Edge {
+                    src: root.id.clone(),
+                    dst: plain.id.clone(),
+                    edge_type: EdgeType::Calls,
+                    ..Edge::default()
+                },
+            ])
+            .unwrap();
+
+        let ranked = expand_context_ranked(&root.id, 1, 8, &storage).unwrap();
+
+        assert_eq!(ranked[0].symbol.id, traced.id);
+        assert_eq!(ranked[0].relation, EdgeType::Calls);
+        assert_eq!(ranked[0].evidence, "execution_trace:request-42");
+        assert_eq!(ranked[0].hops, 1);
     }
 }

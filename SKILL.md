@@ -16,10 +16,11 @@ Use Findex as the retrieval and relationship layer before opening source. Its jo
 5. Prefer one bounded call over repeated broad calls. Stop retrieving when the evidence answers the question.
 6. Reindex after committed disk changes. Use VFS tools for unsaved or speculative content.
 7. Measure the result: note returned tokens, avoided candidate tokens, latency, truncation flags, and unresolved ambiguity.
+8. Read effective settings before relying on an optional stage. A compiled capability and an enabled runtime gate are different facts.
 
 ## Start every repository task
 
-Check index health with `get_stats`. If the index is absent, stale, points at another root, or the requested file is missing, call `reindex` with task mode when available.
+Check index health with `get_stats`, then call `get_settings` when the task depends on lexical/semantic retrieval, reranking, graph expansion, Stack Graphs, VFS, traces, or GPU policy. If the index is absent, stale, points at another root, or the requested file is missing, call `reindex` with task mode when available.
 
 For an unfamiliar repository, call `get_architecture_overview` first. It is source-free and cheaper than a repo-wide search. Fetch `repo_map` only when you need named entrypoints, contracts, or a compact signature map.
 
@@ -41,6 +42,26 @@ Do not call `list_files`, `repo_map`, architecture overview, and graph snapshot 
 | Security/data-flow lead | `taint_trace` | confirm each reported hop in source/tests |
 | Review structural change | `semantic_diff` | inspect changed ranges; run language checks |
 | Resource issue | `get_runtime_profile` | tune one documented environment control |
+| Optional feature behaves differently | `get_settings` | ask before using `set_setting` |
+
+## End-to-end agent protocol
+
+Use this complete sequence for unfamiliar or high-risk work:
+
+1. **Access:** call `get_stats`; record repository identity, freshness, and available indexes.
+2. **Configure:** read `get_settings`; do not change it unless the user asked for a policy change.
+3. **Orient:** use architecture overview for layers/contracts or a focused repo map for signatures.
+4. **Question:** express one behavior, boundary, evidence need, budget, and stop condition.
+5. **Anchor:** use lexical search for exact strings or hybrid search for behavior; keep 5-10 results.
+6. **Resolve:** replace display names with exact IDs through definition/reference tools.
+7. **Relate:** inspect direct typed edges before any multi-hop expansion.
+8. **Budget:** request a 1024-2048 token bundle or prune confirmed seeds into the available window.
+9. **Verify:** read only returned ranges; corroborate important claims with source, tests, or trace evidence.
+10. **Impact:** run impact analysis before changing public, shared, or high-degree symbols.
+11. **Change:** shadow uncertain edits in VFS, micro-compile, then apply the approved disk edit and native checks.
+12. **Refresh:** reindex changed disk state and re-run the exact navigation that established the original hypothesis.
+13. **Report:** distinguish observed evidence, inference, bounded approximations, and any unresolved coverage gap.
+14. **Stop:** do not gather more context once the stated evidence and validation condition are satisfied.
 
 ## Retrieval loop
 
@@ -48,7 +69,7 @@ Use this loop instead of open-ended search:
 
 1. State a concrete retrieval question: behavior + boundary + expected artifact.
 2. Call the narrowest tool with a limit or token budget.
-3. Inspect reasons, scores, exact IDs, graph hops, and truncation metadata.
+3. Inspect reasons, scores, exact IDs, graph hops, provenance, `retrieval_trace.effective_mode`, and truncation metadata.
 4. Read only returned source ranges plus minimal local context.
 5. Verify the hypothesis with definitions, callers, tests, or a micro-compile.
 6. Stop when evidence is sufficient. If not, expand exactly one dimension: query specificity, one graph hop, or budget.
@@ -60,6 +81,7 @@ This is a least-to-most workflow: establish anchors first, resolve relationships
 - Use lexical mode for identifiers, paths, error strings, API names, and regex patterns.
 - Use hybrid mode for behavioral questions. It combines lexical and dense evidence when vectors exist.
 - Use semantic mode only for vocabulary mismatch and only after `get_stats` confirms vectors.
+- If a requested retrieval leg is disabled, inspect `effective_mode`; Findex may use the enabled leg. It returns an error when both lexical and semantic retrieval are disabled.
 - Start `search_code` at 5-10 results. Reranking 100 weak candidates wastes compute and attention.
 - Start `get_context_bundle` at 2048 tokens. Use 1024 for localization and 4096 only for cross-layer planning.
 - Use `regex:` only with a bounded literal pattern. Do not reproduce a repository-wide grep inside a regex.
@@ -114,6 +136,7 @@ If relationships conflict with source, trust current source, report the stale/he
 - Published Stack Graph rules provide exact resolution only for Python, JavaScript, TypeScript/TSX, and Java in this build. Other languages use parser-backed symbols plus heuristic resolution.
 - Dynamic language resolution remains partial even with Stack Graphs.
 - CUDA accelerates compatible ONNX embedding/reranking inference only. Parsing, hashing, graph building, Tantivy, and USearch remain CPU work.
+- Runtime settings can select `auto`, `cpu`, or `cuda`; a CUDA request still falls back safely when the binary/provider/hardware is incompatible.
 - The vector index is optional; lexical, AST, and graph tools remain useful without models.
 - VFS persistence is opt-in because it stores unsaved source content.
 - Watch mode uses debounced changed paths and Merkle content identity. A change may still trigger a repository discovery pass to preserve deletion and ignore-rule correctness.
@@ -126,6 +149,6 @@ If relationships conflict with source, trust current source, report the stale/he
 
 ## Human interfaces
 
-Use `findex tui` for interactive search, graph queries, topology, impact inspection, reindexing, and resource telemetry. Set `FINDEX_TUI_ICONS=ascii` without a Nerd Font and `FINDEX_TUI_MOTION=0` for reduced motion.
+Use `findex tui` for interactive search, typed-edge graph filtering, 0-4 hop neighborhoods, pan/zoom/fit, graph queries, impact inspection, reindexing, and resource telemetry. Set `FINDEX_TUI_ICONS=ascii` without a Nerd Font and `FINDEX_TUI_MOTION=0` for reduced motion.
 
-Use `findex --format json <command>` for scripts. Use `findex models --profile fast` for the CPU-first default, choose `balanced` only when code-specialized accuracy justifies a 768d rebuild, and reserve `quality` for measured offline evaluation. Verify cache-only operation with the same profile plus `--offline`, and run `findex doctor --format json` before enabling CUDA. Use `findex update check` for read-only release discovery; never call `update install --yes` for a human unless they explicitly authorized installation.
+Use `findex settings show` to inspect the same persisted controls used by MCP, TUI, and desktop; `findex settings set --help` changes only named values. Use `findex --format json <command>` for scripts. Use `findex models --profile fast` for the CPU-first default, choose `balanced` only when code-specialized accuracy justifies a 768d rebuild, and reserve `quality` for measured offline evaluation. Verify cache-only operation with the same profile plus `--offline`, and run `findex doctor --format json` before enabling CUDA. Use `findex update check` for read-only release discovery; never call `update install --yes` for a human unless they explicitly authorized installation.

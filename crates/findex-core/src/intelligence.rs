@@ -5,12 +5,133 @@ use crate::search::vector::Embedder;
 use crate::storage::{EdgeType, Storage, Symbol};
 use crate::structural_locality::{predict_context, PredictContextOptions};
 use crate::token_budget::count_tokens;
-use crate::{get_codebase_skeleton, search_codebase_with_components, IngestionError};
+use crate::{get_codebase_skeleton, IngestionError};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+
+#[derive(Debug, Clone)]
+struct ResolvedGraphEdge {
+    source: String,
+    target: String,
+    kind: EdgeType,
+    confidence: f32,
+    evidence: String,
+    tags: Vec<String>,
+}
+
+/// Parser edges deliberately keep unresolved names so ingestion stays file-
+/// incremental. Visualization and repository-level reasoning need stable IDs,
+/// so resolve them once in a batch with locality-aware tie breaking instead of
+/// invoking the much heavier single-reference PageRank resolver per edge.
+fn resolve_graph_edges(
+    symbols: &[Symbol],
+    edges: &[crate::storage::Edge],
+) -> Vec<ResolvedGraphEdge> {
+    let by_id: HashMap<&str, &Symbol> = symbols
+        .iter()
+        .map(|symbol| (symbol.id.as_str(), symbol))
+        .collect();
+    let mut by_name: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+    for symbol in symbols {
+        by_name
+            .entry(symbol.name.as_str())
+            .or_default()
+            .push(symbol);
+        if let Some(qualified) = symbol
+            .qualified_name
+            .as_deref()
+            .filter(|qualified| *qualified != symbol.name)
+        {
+            by_name.entry(qualified).or_default().push(symbol);
+        }
+    }
+
+    edges
+        .iter()
+        .filter_map(|edge| {
+            let source = by_id.get(edge.src.as_str()).copied()?;
+            let (target, confidence, evidence) = if let Some(target) = by_id.get(edge.dst.as_str())
+            {
+                (
+                    *target,
+                    if edge.tags.iter().any(|tag| tag == "stack-graphs") {
+                        0.99
+                    } else {
+                        1.0
+                    },
+                    if edge.trace_id.is_some() {
+                        "execution_trace"
+                    } else if edge.tags.iter().any(|tag| tag == "stack-graphs") {
+                        "stack_graph"
+                    } else {
+                        "exact_id"
+                    },
+                )
+            } else {
+                let leaf = edge
+                    .dst
+                    .rsplit(['.', ':', '/', '\\'])
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(edge.dst.as_str());
+                let candidates = by_name
+                    .get(edge.dst.as_str())
+                    .or_else(|| by_name.get(leaf))?;
+                let target = candidates.iter().copied().max_by(|left, right| {
+                    graph_locality_score(source, left)
+                        .cmp(&graph_locality_score(source, right))
+                        .then_with(|| right.id.cmp(&left.id))
+                })?;
+                let same_file = normalized_path_key(&source.file_path)
+                    == normalized_path_key(&target.file_path);
+                let confidence = if candidates.len() == 1 {
+                    0.92
+                } else if same_file {
+                    0.84
+                } else {
+                    0.64
+                };
+                (
+                    target,
+                    confidence,
+                    if candidates.len() == 1 {
+                        "unique_name"
+                    } else if same_file {
+                        "file_locality"
+                    } else {
+                        "path_locality"
+                    },
+                )
+            };
+            Some(ResolvedGraphEdge {
+                source: source.id.clone(),
+                target: target.id.clone(),
+                kind: edge.edge_type,
+                confidence,
+                evidence: evidence.to_string(),
+                tags: edge.tags.clone(),
+            })
+        })
+        .collect()
+}
+
+fn graph_locality_score(source: &Symbol, target: &Symbol) -> usize {
+    let source_path = normalized_path_key(&source.file_path);
+    let target_path = normalized_path_key(&target.file_path);
+    if source_path == target_path {
+        return usize::MAX;
+    }
+    let shared_components = source_path
+        .split('/')
+        .zip(target_path.split('/'))
+        .take_while(|(left, right)| left == right)
+        .count();
+    shared_components.saturating_mul(8)
+        + usize::from(source.language == target.language)
+        + usize::from(source.parent_id == target.parent_id && source.parent_id.is_some()) * 4
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextItem {
@@ -80,14 +201,17 @@ pub fn architecture_overview(storage: &Storage) -> Result<ArchitectureOverview, 
         .iter()
         .map(|symbol| (symbol.id.as_str(), symbol))
         .collect();
+    let resolved_edges = resolve_graph_edges(&symbols, &edges);
     let mut incoming: HashMap<&str, usize> = HashMap::new();
     let mut outgoing: HashMap<&str, usize> = HashMap::new();
     let mut cross_file_edges = 0;
-    for edge in &edges {
-        *incoming.entry(edge.dst.as_str()).or_default() += 1;
-        *outgoing.entry(edge.src.as_str()).or_default() += 1;
-        if let (Some(src), Some(dst)) = (by_id.get(edge.src.as_str()), by_id.get(edge.dst.as_str()))
-        {
+    for edge in &resolved_edges {
+        *incoming.entry(edge.target.as_str()).or_default() += 1;
+        *outgoing.entry(edge.source.as_str()).or_default() += 1;
+        if let (Some(src), Some(dst)) = (
+            by_id.get(edge.source.as_str()),
+            by_id.get(edge.target.as_str()),
+        ) {
             if normalized_path_key(&src.file_path) != normalized_path_key(&dst.file_path) {
                 cross_file_edges += 1;
             }
@@ -221,6 +345,20 @@ pub struct ContextBundle {
     pub candidate_tokens_avoided: usize,
     pub repo_map: String,
     pub items: Vec<ContextItem>,
+    pub retrieval_trace: RetrievalTrace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrievalTrace {
+    pub requested_mode: String,
+    pub effective_mode: String,
+    pub lexical: bool,
+    pub semantic: bool,
+    pub reranking: bool,
+    pub graph_expansion: bool,
+    pub structural_prefetch: bool,
+    pub graph_hops: u32,
+    pub candidate_limit: usize,
 }
 
 /// A single bounded retrieval product that replaces the common agent loop of
@@ -235,29 +373,45 @@ pub fn build_context_bundle<P: AsRef<Path>>(
     reranker: Option<&dyn Reranker>,
     embedder: &dyn Embedder,
 ) -> Result<ContextBundle, IngestionError> {
+    let db_path = db_path.as_ref();
+    let settings = crate::settings::load_or_default(db_path);
     let token_budget = token_budget.clamp(128, 32_768);
     let map_budget = (token_budget / 4).clamp(64, 1024);
     let repo_map = get_codebase_skeleton(storage, map_budget)?;
     let mut used = count_tokens(&repo_map);
-    let search_candidates =
-        search_codebase_with_components(db_path, storage, query, mode, reranker, embedder, 40)?;
+    let search_options = crate::SearchOptions::from(&settings);
+    let effective_mode = crate::effective_search_mode(mode, search_options)?;
+    let search_candidates = crate::search_codebase_with_options(
+        db_path,
+        storage,
+        query,
+        mode,
+        reranker,
+        embedder,
+        40,
+        search_options,
+    )?;
 
     let seed_ids: Vec<_> = search_candidates
         .iter()
         .take(5)
         .map(|(symbol, _)| symbol.id.clone())
         .collect();
-    let predicted = predict_context(
-        storage,
-        &seed_ids,
-        &PredictContextOptions {
-            max_hops: 2,
-            max_results: 32,
-            max_nodes_visited: 512,
-            max_neighbors_per_node: 96,
-            ..PredictContextOptions::default()
-        },
-    )?;
+    let predicted = if settings.retrieval.structural_prefetch {
+        predict_context(
+            storage,
+            &seed_ids,
+            &PredictContextOptions {
+                max_hops: settings.retrieval.graph_hops.clamp(1, 4),
+                max_results: settings.retrieval.candidate_limit.min(64),
+                max_nodes_visited: settings.retrieval.candidate_limit.saturating_mul(16),
+                max_neighbors_per_node: 96,
+                ..PredictContextOptions::default()
+            },
+        )?
+    } else {
+        Vec::new()
+    };
 
     let mut candidates: Vec<(Symbol, f32, String, Option<u32>)> = search_candidates
         .into_iter()
@@ -326,6 +480,17 @@ pub fn build_context_bundle<P: AsRef<Path>>(
         candidate_tokens_avoided: candidate_tokens.saturating_sub(retained_tokens),
         repo_map,
         items,
+        retrieval_trace: RetrievalTrace {
+            requested_mode: mode.to_string(),
+            effective_mode: effective_mode.to_string(),
+            lexical: settings.indexing.lexical_index,
+            semantic: settings.retrieval.semantic_search && settings.indexing.semantic_index,
+            reranking: settings.retrieval.reranking,
+            graph_expansion: settings.retrieval.graph_expansion,
+            structural_prefetch: settings.retrieval.structural_prefetch,
+            graph_hops: settings.retrieval.graph_hops,
+            candidate_limit: settings.retrieval.candidate_limit,
+        },
     })
 }
 
@@ -496,28 +661,32 @@ pub struct GraphLink {
     pub source: String,
     pub target: String,
     pub kind: EdgeType,
+    pub confidence: f32,
+    pub evidence: String,
+    pub tags: Vec<String>,
 }
 
 pub fn graph_snapshot(storage: &Storage, limit: usize) -> Result<GraphSnapshot, IngestionError> {
     let symbols = storage.list_symbols()?;
     let edges = storage.list_edges()?;
+    let resolved_edges = resolve_graph_edges(&symbols, &edges);
     let mut degrees: HashMap<String, usize> = HashMap::new();
-    for edge in &edges {
-        *degrees.entry(edge.src.clone()).or_default() += 1;
-        *degrees.entry(edge.dst.clone()).or_default() += 1;
+    for edge in &resolved_edges {
+        *degrees.entry(edge.source.clone()).or_default() += 1;
+        *degrees.entry(edge.target.clone()).or_default() += 1;
     }
     let symbol_ids: BTreeSet<_> = symbols.iter().map(|symbol| symbol.id.clone()).collect();
     let mut ranked = symbols;
     ranked.sort_by_key(|symbol| std::cmp::Reverse(*degrees.get(symbol.id.as_str()).unwrap_or(&0)));
     let node_limit = limit.clamp(1, 10_000);
-    let mut ranked_edges: Vec<_> = edges
+    let mut ranked_edges: Vec<_> = resolved_edges
         .iter()
-        .filter(|edge| symbol_ids.contains(&edge.src) && symbol_ids.contains(&edge.dst))
+        .filter(|edge| symbol_ids.contains(&edge.source) && symbol_ids.contains(&edge.target))
         .collect();
     ranked_edges.sort_by_key(|edge| {
         std::cmp::Reverse(
-            degrees.get(edge.src.as_str()).copied().unwrap_or(0)
-                + degrees.get(edge.dst.as_str()).copied().unwrap_or(0),
+            degrees.get(edge.source.as_str()).copied().unwrap_or(0)
+                + degrees.get(edge.target.as_str()).copied().unwrap_or(0),
         )
     });
 
@@ -525,11 +694,11 @@ pub fn graph_snapshot(storage: &Storage, limit: usize) -> Result<GraphSnapshot, 
     // nodes alone can produce a visually useless cloud with zero visible links.
     let mut included = BTreeSet::new();
     for edge in &ranked_edges {
-        let needed =
-            usize::from(!included.contains(&edge.src)) + usize::from(!included.contains(&edge.dst));
+        let needed = usize::from(!included.contains(&edge.source))
+            + usize::from(!included.contains(&edge.target));
         if needed > 0 && included.len() + needed <= node_limit {
-            included.insert(edge.src.clone());
-            included.insert(edge.dst.clone());
+            included.insert(edge.source.clone());
+            included.insert(edge.target.clone());
         }
         if included.len() >= node_limit {
             break;
@@ -581,16 +750,19 @@ pub fn graph_snapshot(storage: &Storage, limit: usize) -> Result<GraphSnapshot, 
     let edge_limit = node_limit.saturating_mul(8).clamp(1, 50_000);
     let eligible_links: Vec<_> = ranked_edges
         .into_iter()
-        .filter(|edge| included.contains(&edge.src) && included.contains(&edge.dst))
+        .filter(|edge| included.contains(&edge.source) && included.contains(&edge.target))
         .collect();
     let truncated = symbol_ids.len() > node_limit || eligible_links.len() > edge_limit;
     let links = eligible_links
         .into_iter()
         .take(edge_limit)
         .map(|edge| GraphLink {
-            source: edge.src.clone(),
-            target: edge.dst.clone(),
-            kind: edge.edge_type,
+            source: edge.source.clone(),
+            target: edge.target.clone(),
+            kind: edge.kind,
+            confidence: edge.confidence,
+            evidence: edge.evidence.clone(),
+            tags: edge.tags.clone(),
         })
         .collect();
     Ok(GraphSnapshot {
@@ -663,5 +835,31 @@ mod tests {
 
         assert_eq!(snapshot.nodes.len(), 2);
         assert!(!snapshot.links.is_empty());
+    }
+
+    #[test]
+    fn graph_snapshot_resolves_parser_target_names_to_symbol_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(directory.path()).unwrap();
+        let source = symbol("src/main.rs#main", "src/main.rs", None);
+        let mut target = symbol("src/lib.rs#run", "src/lib.rs", None);
+        target.name = "run".to_string();
+        storage.save_symbol(&source).unwrap();
+        storage.save_symbol(&target).unwrap();
+        storage
+            .save_edge(&Edge {
+                src: source.id,
+                dst: "run".to_string(),
+                edge_type: EdgeType::Calls,
+                ..Edge::default()
+            })
+            .unwrap();
+
+        let snapshot = graph_snapshot(&storage, 8).unwrap();
+
+        assert_eq!(snapshot.links.len(), 1);
+        assert_eq!(snapshot.links[0].target, "src/lib.rs#run");
+        assert_eq!(snapshot.links[0].evidence, "unique_name");
+        assert!(snapshot.links[0].confidence >= 0.9);
     }
 }

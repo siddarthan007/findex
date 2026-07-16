@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use ndarray::Array2;
@@ -185,7 +185,7 @@ fn build_session(model_path: &Path) -> Result<Session, VectorError> {
     #[cfg(feature = "cuda")]
     let mut builder = {
         use ort::ep::ExecutionProvider;
-        let device = std::env::var("FINDEX_ONNX_DEVICE").unwrap_or_else(|_| "auto".to_string());
+        let device = crate::runtime::onnx_device();
         let cuda = crate::runtime::cuda_execution_provider();
         if !device.eq_ignore_ascii_case("cpu") && cuda.is_available().unwrap_or(false) {
             match builder.with_execution_providers([cuda.build()]) {
@@ -503,6 +503,53 @@ impl LocalEmbedder {
     }
 }
 
+struct DeferredEmbedder {
+    current: Arc<RwLock<Arc<dyn Embedder>>>,
+}
+
+impl Embedder for DeferredEmbedder {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.current
+            .read()
+            .expect("deferred embedder lock was poisoned")
+            .embed(text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+        self.current
+            .read()
+            .expect("deferred embedder lock was poisoned")
+            .embed_batch(texts)
+    }
+
+    fn dimension(&self) -> usize {
+        self.current
+            .read()
+            .expect("deferred embedder lock was poisoned")
+            .dimension()
+    }
+
+    fn fingerprint(&self) -> String {
+        self.current
+            .read()
+            .expect("deferred embedder lock was poisoned")
+            .fingerprint()
+    }
+
+    fn release_idle_resources(&self, idle_for: Duration) -> bool {
+        self.current
+            .read()
+            .expect("deferred embedder lock was poisoned")
+            .release_idle_resources(idle_for)
+    }
+}
+
+fn load_resolved_embedder(
+    model: &crate::models::ResolvedModel,
+) -> Result<LocalEmbedder, VectorError> {
+    LocalEmbedder::from_files(&model.model_path, &model.tokenizer_path)
+}
+
 /// Create an embedder from the environment.
 ///
 /// If `FINDEX_EMBEDDING_MODEL_DIR` is set and points to a valid local ONNX
@@ -527,8 +574,14 @@ pub fn create_embedder(dimension: usize) -> Arc<dyn Embedder> {
             }
         }
     }
-    match crate::models::resolve_runtime_model(crate::models::ModelKind::Embedding) {
-        Ok(Some(model)) => match LocalEmbedder::from_files(&model.model_path, &model.tokenizer_path) {
+    let kind = crate::models::ModelKind::Embedding;
+    let profile = crate::models::model_profile();
+    if crate::models::model_policy() == crate::models::ModelPolicy::Disabled {
+        return Arc::new(crate::search::vector::MockEmbedder::new(dimension));
+    }
+
+    match crate::models::ensure_model_for_profile(kind, profile, true) {
+        Ok(model) => match load_resolved_embedder(&model) {
             Ok(embedder) => {
                 eprintln!(
                     "Loaded pinned embedding model {}@{} (dimension={})",
@@ -541,8 +594,39 @@ pub fn create_embedder(dimension: usize) -> Arc<dyn Embedder> {
                 model.repository, error
             ),
         },
-        Ok(None) => {}
-        Err(error) => eprintln!("Automatic embedding model acquisition failed: {error}"),
+        Err(error) if crate::models::model_policy() == crate::models::ModelPolicy::Offline => {
+            eprintln!("Offline embedding model is not cached: {error}");
+        }
+        Err(_) => {
+            let expected_dimension = match profile {
+                crate::models::ModelProfile::Fast => 384,
+                crate::models::ModelProfile::Balanced | crate::models::ModelProfile::Quality => 768,
+            };
+            let current: Arc<RwLock<Arc<dyn Embedder>>> = Arc::new(RwLock::new(Arc::new(
+                crate::search::vector::MockEmbedder::new(expected_dimension),
+            )));
+            let background = Arc::clone(&current);
+            let _ = std::thread::Builder::new()
+                .name("findex-embedding-download".to_string())
+                .spawn(move || match crate::models::ensure_model_for_profile(kind, profile, false) {
+                    Ok(model) => match load_resolved_embedder(&model) {
+                        Ok(embedder) => {
+                            *background
+                                .write()
+                                .expect("deferred embedder lock was poisoned") = Arc::new(embedder);
+                            eprintln!(
+                                "Pinned embedding model {}@{} is ready",
+                                model.repository, model.revision
+                            );
+                        }
+                        Err(error) => eprintln!(
+                            "Downloaded embedding model could not be loaded: {error}"
+                        ),
+                    },
+                    Err(error) => eprintln!("Background embedding acquisition failed: {error}"),
+                });
+            return Arc::new(DeferredEmbedder { current });
+        }
     }
     Arc::new(crate::search::vector::MockEmbedder::new(dimension))
 }

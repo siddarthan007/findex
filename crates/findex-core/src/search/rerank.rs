@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use ndarray::Array2;
@@ -386,7 +386,7 @@ fn build_session(model_path: &Path) -> Result<Session, IngestionError> {
     #[cfg(feature = "cuda")]
     let mut builder = {
         use ort::ep::ExecutionProvider;
-        let device = std::env::var("FINDEX_ONNX_DEVICE").unwrap_or_else(|_| "auto".to_string());
+        let device = crate::runtime::onnx_device();
         let cuda = crate::runtime::cuda_execution_provider();
         if !device.eq_ignore_ascii_case("cpu") && cuda.is_available().unwrap_or(false) {
             match builder.with_execution_providers([cuda.build()]) {
@@ -475,6 +475,38 @@ impl Reranker for CrossEncoderReranker {
     }
 }
 
+struct DeferredReranker {
+    current: Arc<RwLock<Arc<dyn Reranker>>>,
+}
+
+impl Reranker for DeferredReranker {
+    fn rerank(
+        &self,
+        query: &str,
+        candidates: &[(Symbol, f32)],
+    ) -> Result<Vec<(Symbol, f32)>, IngestionError> {
+        self.current
+            .read()
+            .map_err(|_| {
+                IngestionError::Reranker("deferred reranker lock was poisoned".to_string())
+            })?
+            .rerank(query, candidates)
+    }
+
+    fn release_idle_resources(&self, idle_for: Duration) -> bool {
+        self.current
+            .read()
+            .map(|reranker| reranker.release_idle_resources(idle_for))
+            .unwrap_or(false)
+    }
+}
+
+fn load_resolved_reranker(
+    model: &crate::models::ResolvedModel,
+) -> Result<CrossEncoderReranker, IngestionError> {
+    CrossEncoderReranker::from_files(&model.model_path, &model.tokenizer_path)
+}
+
 /// Create a reranker from the environment.
 ///
 /// If `FINDEX_RERANKER_MODEL_DIR` is set and points to a valid local ONNX
@@ -496,24 +528,56 @@ pub fn create_reranker() -> Arc<dyn Reranker> {
             }
         }
     }
-    match crate::models::resolve_runtime_model(crate::models::ModelKind::Reranker) {
-        Ok(Some(model)) => {
-            match CrossEncoderReranker::from_files(&model.model_path, &model.tokenizer_path) {
-                Ok(reranker) => {
-                    eprintln!(
-                        "Loaded pinned reranker {}@{}",
-                        model.repository, model.revision
-                    );
-                    return Arc::new(reranker);
-                }
-                Err(error) => eprintln!(
+    let kind = crate::models::ModelKind::Reranker;
+    let profile = crate::models::model_profile();
+    if crate::models::model_policy() == crate::models::ModelPolicy::Disabled {
+        return Arc::new(MockReranker);
+    }
+    match crate::models::ensure_model_for_profile(kind, profile, true) {
+        Ok(model) => match load_resolved_reranker(&model) {
+            Ok(reranker) => {
+                eprintln!(
+                    "Loaded pinned reranker {}@{}",
+                    model.repository, model.revision
+                );
+                return Arc::new(reranker);
+            }
+            Err(error) => eprintln!(
                 "Failed to load cached reranker {}: {}. Falling back to lexical overlap reranking.",
                 model.repository, error
             ),
-            }
+        },
+        Err(error) if crate::models::model_policy() == crate::models::ModelPolicy::Offline => {
+            eprintln!("Offline reranker is not cached: {error}");
         }
-        Ok(None) => {}
-        Err(error) => eprintln!("Automatic reranker acquisition failed: {error}"),
+        Err(_) => {
+            let current: Arc<RwLock<Arc<dyn Reranker>>> =
+                Arc::new(RwLock::new(Arc::new(MockReranker)));
+            let background = Arc::clone(&current);
+            let _ = std::thread::Builder::new()
+                .name("findex-reranker-download".to_string())
+                .spawn(move || {
+                    match crate::models::ensure_model_for_profile(kind, profile, false) {
+                        Ok(model) => match load_resolved_reranker(&model) {
+                            Ok(reranker) => {
+                                *background
+                                    .write()
+                                    .expect("deferred reranker lock was poisoned") =
+                                    Arc::new(reranker);
+                                eprintln!(
+                                    "Pinned reranker {}@{} is ready",
+                                    model.repository, model.revision
+                                );
+                            }
+                            Err(error) => {
+                                eprintln!("Downloaded reranker could not be loaded: {error}")
+                            }
+                        },
+                        Err(error) => eprintln!("Background reranker acquisition failed: {error}"),
+                    }
+                });
+            return Arc::new(DeferredReranker { current });
+        }
     }
     Arc::new(MockReranker)
 }

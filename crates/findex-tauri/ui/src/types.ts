@@ -16,6 +16,9 @@ export interface GraphLink {
   source: string | GraphNode;
   target: string | GraphNode;
   kind: string;
+  confidence: number;
+  evidence: string;
+  tags: string[];
 }
 
 export interface GraphSnapshot {
@@ -102,6 +105,7 @@ export interface RuntimeProfile {
   gpu_memory_limit_bytes: number;
   model_policy: string;
   model_profile: string;
+  compute_device: 'auto' | 'cpu' | 'cuda' | string;
   gpu_devices: Array<{
     name: string;
     total_memory_mib: number;
@@ -109,6 +113,44 @@ export interface RuntimeProfile {
     utilization_percent: number;
     temperature_celsius?: number;
   }>;
+}
+
+export type ThemePreference = 'system' | 'light' | 'dark';
+export type ComputeDevice = 'auto' | 'cpu' | 'cuda';
+
+export interface FindexSettings {
+  version: number;
+  indexing: {
+    lexical_index: boolean;
+    semantic_index: boolean;
+    stack_graphs: boolean;
+    watcher: boolean;
+    vfs_shadowing: boolean;
+    execution_trace_pinning: boolean;
+  };
+  retrieval: {
+    semantic_search: boolean;
+    reranking: boolean;
+    graph_expansion: boolean;
+    structural_prefetch: boolean;
+    graph_hops: number;
+    candidate_limit: number;
+    default_token_budget: number;
+    mmr_lambda: number;
+  };
+  runtime: {
+    compute_device: ComputeDevice;
+    model_profile: 'fast' | 'balanced' | 'quality';
+    memory_budget_mib: number;
+    gpu_memory_limit_mib: number;
+    model_idle_seconds: number;
+  };
+  ui: {
+    theme: ThemePreference;
+    motion: boolean;
+    graph_particles: boolean;
+    graph_labels: boolean;
+  };
 }
 
 export interface DesktopUpdateInfo {

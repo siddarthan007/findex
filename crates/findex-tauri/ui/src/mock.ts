@@ -1,4 +1,4 @@
-import type { GraphSnapshot, RuntimeProfile, Stats } from './types';
+import type { FindexSettings, GraphSnapshot, RuntimeProfile, Stats } from './types';
 
 const kinds = ['Function', 'Struct', 'Component', 'Handler', 'Interface', 'Method'];
 const names = ['ingest', 'resolve', 'SearchPanel', 'apiContext', 'SymbolGraph', 'rank', 'parseVue', 'query'];
@@ -16,8 +16,8 @@ export const mockGraph: GraphSnapshot = (() => {
     } as const;
   });
   const links = nodes.flatMap((node, index) => [
-    { source: node.id, target: nodes[(index * 7 + 11) % nodes.length].id, kind: 'Calls' },
-    ...(index % 3 === 0 ? [{ source: node.id, target: nodes[(index + 1) % nodes.length].id, kind: 'References' }] : [])
+    { source: node.id, target: nodes[(index * 7 + 11) % nodes.length].id, kind: 'Calls', confidence: .96, evidence: 'stack_graph', tags: ['stack-graphs'] },
+    ...(index % 3 === 0 ? [{ source: node.id, target: nodes[(index + 1) % nodes.length].id, kind: 'References', confidence: .82, evidence: 'file_locality', tags: [] }] : [])
   ]);
   return { nodes, links, truncated: true };
 })();
@@ -45,5 +45,14 @@ export const mockRuntime: RuntimeProfile = {
   gpu_memory_limit_bytes: 2147483648,
   model_policy: 'disabled',
   model_profile: 'fast',
+  compute_device: 'auto',
   gpu_devices: [{ name: 'NVIDIA RTX', total_memory_mib: 8192, used_memory_mib: 1840, utilization_percent: 12, temperature_celsius: 47 }]
+};
+
+export const mockSettings: FindexSettings = {
+  version: 1,
+  indexing: { lexical_index: true, semantic_index: true, stack_graphs: true, watcher: true, vfs_shadowing: true, execution_trace_pinning: true },
+  retrieval: { semantic_search: true, reranking: true, graph_expansion: true, structural_prefetch: true, graph_hops: 1, candidate_limit: 32, default_token_budget: 2048, mmr_lambda: .75 },
+  runtime: { compute_device: 'auto', model_profile: 'fast', memory_budget_mib: 2048, gpu_memory_limit_mib: 4096, model_idle_seconds: 300 },
+  ui: { theme: 'system', motion: true, graph_particles: true, graph_labels: true }
 };

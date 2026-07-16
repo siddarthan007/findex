@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
@@ -251,6 +252,18 @@ impl McpServer {
                 "description": "Symbol/edge/vector counts.",
                 "mimeType": "application/json"
             }),
+            json!({
+                "uri": "findex://architecture",
+                "name": "Architecture Overview",
+                "description": "Source-free language, layer, contract, entrypoint, hub, and coupling digest.",
+                "mimeType": "application/json"
+            }),
+            json!({
+                "uri": "findex://settings",
+                "name": "Effective Settings",
+                "description": "Current indexing, retrieval, compute, memory, and UI gates.",
+                "mimeType": "application/json"
+            }),
         ];
 
         // One resource per indexed file so an agent can pull a skeleton on demand.
@@ -305,6 +318,26 @@ impl McpServer {
                     .unwrap_or_else(|_| "{}".to_string()),
                 )
             }
+            "findex://architecture" => match architecture_overview(&self.storage) {
+                Ok(overview) => match serde_json::to_string_pretty(&overview) {
+                    Ok(text) => ("application/json", text),
+                    Err(error) => {
+                        return Self::error_response(request.id.clone(), -32603, error.to_string())
+                    }
+                },
+                Err(error) => {
+                    return Self::error_response(request.id.clone(), -32603, error.to_string())
+                }
+            },
+            "findex://settings" => match crate::settings::load(&self.db_path) {
+                Ok(settings) => (
+                    "application/json",
+                    serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".to_string()),
+                ),
+                Err(error) => {
+                    return Self::error_response(request.id.clone(), -32603, error.to_string())
+                }
+            },
             other if other.starts_with("findex://file/") => {
                 let encoded = &other["findex://file/".len()..];
                 let path = url_decode(encoded);
@@ -760,6 +793,35 @@ impl McpServer {
                             "properties": { "include_gpu": { "type": "boolean", "default": true } }
                         },
                         "outputSchema": { "type": "object" }
+                    },
+                    {
+                        "name": "get_settings",
+                        "description": "Return the effective persisted indexing, retrieval, compute, memory, and UI controls. Read this before assuming semantic, graph, VFS, trace, or GPU stages are enabled.",
+                        "inputSchema": { "type": "object", "properties": {} },
+                        "outputSchema": { "type": "object" }
+                    },
+                    {
+                        "name": "set_setting",
+                        "description": "Change one validated production setting without resetting unrelated controls. This mutates the index-local settings file; use only when the user asked for a runtime policy change.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "key": {
+                                    "type": "string",
+                                    "enum": [
+                                        "lexical", "semantic", "reranking", "graph_expansion", "structural_prefetch",
+                                        "stack_graphs", "watcher", "vfs_shadowing", "trace_pinning",
+                                        "graph_hops", "candidate_limit", "token_budget", "mmr_lambda",
+                                        "compute_device", "model_profile", "memory_budget_mib",
+                                        "gpu_memory_limit_mib", "model_idle_seconds", "theme", "motion",
+                                        "graph_particles", "graph_labels"
+                                    ]
+                                },
+                                "value": {}
+                            },
+                            "required": ["key", "value"]
+                        },
+                        "outputSchema": { "type": "object" }
                     }
                 ]
             }
@@ -848,6 +910,8 @@ impl McpServer {
             "get_graph_snapshot" => self.tool_get_graph_snapshot(args),
             "get_architecture_overview" => self.tool_get_architecture_overview(),
             "get_runtime_profile" => self.tool_get_runtime_profile(args),
+            "get_settings" => self.tool_get_settings(),
+            "set_setting" => self.tool_set_setting(args),
             other => Err(McpError::UnknownTool(other.to_string())),
         }
     }
@@ -967,21 +1031,28 @@ impl McpServer {
             self.embedder.as_ref(),
             limit.clamp(1, 100),
         )?;
-        let mut lines = Vec::new();
-        for (idx, (sym, score)) in results.iter().enumerate() {
-            lines.push(format!(
-                "{}. [Score: {:.4}] [{}] {} -> {}:{}-{}",
-                idx + 1,
-                score,
-                sym.kind,
-                sym.name,
-                sym.file_path,
-                sym.start_line,
-                sym.end_line
-            ));
-            lines.push(format!("   Signature: {}", sym.signature));
-        }
-        Ok(lines.join("\n"))
+        let settings = crate::settings::load_or_default(&self.db_path);
+        let values: Vec<_> = results
+            .into_iter()
+            .map(|(symbol, score)| json!({ "score": score, "symbol": symbol }))
+            .collect();
+        Ok(serde_json::to_string_pretty(&json!({
+            "query": query,
+            "requested_mode": mode,
+            "effective_mode": if !settings.retrieval.semantic_search || !settings.indexing.semantic_index {
+                "lexical"
+            } else if mode == "semantic" {
+                "semantic"
+            } else if mode == "lexical" {
+                "lexical"
+            } else {
+                "hybrid"
+            },
+            "reranking": settings.retrieval.reranking,
+            "graph_expansion": settings.retrieval.graph_expansion,
+            "graph_hops": settings.retrieval.graph_hops,
+            "results": values
+        }))?)
     }
 
     fn tool_get_definition(&self, args: &Value) -> Result<String, McpError> {
@@ -1177,12 +1248,28 @@ impl McpServer {
         };
         let result = propagate_taint(&self.storage, &[(source.to_string(), label)], &config)?;
         if args.get("pin").and_then(Value::as_bool).unwrap_or(false) {
+            if !crate::settings::load_or_default(&self.db_path)
+                .indexing
+                .execution_trace_pinning
+            {
+                return Err(McpError::InvalidRequest(
+                    "taint pinning is disabled in Findex settings".to_string(),
+                ));
+            }
             pin_taint(&self.storage, &result)?;
         }
         Ok(serde_json::to_string_pretty(&result)?)
     }
 
     fn tool_predict_context(&self, args: &Value) -> Result<String, McpError> {
+        if !crate::settings::load_or_default(&self.db_path)
+            .retrieval
+            .structural_prefetch
+        {
+            return Err(McpError::InvalidRequest(
+                "structural prefetch is disabled in Findex settings".to_string(),
+            ));
+        }
         let symbol_ids: Vec<String> = args
             .get("symbol_ids")
             .and_then(Value::as_array)
@@ -1245,6 +1332,14 @@ impl McpServer {
     }
 
     fn tool_vfs_update(&self, args: &Value) -> Result<String, McpError> {
+        if !crate::settings::load_or_default(&self.db_path)
+            .indexing
+            .vfs_shadowing
+        {
+            return Err(McpError::InvalidRequest(
+                "VFS shadowing is disabled in Findex settings".to_string(),
+            ));
+        }
         let path = args
             .get("path")
             .and_then(Value::as_str)
@@ -1274,6 +1369,14 @@ impl McpServer {
     }
 
     fn tool_micro_compile(&self, args: &Value) -> Result<String, McpError> {
+        if !crate::settings::load_or_default(&self.db_path)
+            .indexing
+            .vfs_shadowing
+        {
+            return Err(McpError::InvalidRequest(
+                "VFS shadowing and micro-compilation are disabled in Findex settings".to_string(),
+            ));
+        }
         let path = args
             .get("path")
             .and_then(Value::as_str)
@@ -1286,6 +1389,14 @@ impl McpServer {
     }
 
     fn tool_pin_execution_trace(&self, args: &Value) -> Result<String, McpError> {
+        if !crate::settings::load_or_default(&self.db_path)
+            .indexing
+            .execution_trace_pinning
+        {
+            return Err(McpError::InvalidRequest(
+                "execution trace pinning is disabled in Findex settings".to_string(),
+            ));
+        }
         let trace_id = args
             .get("trace_id")
             .and_then(Value::as_str)
@@ -1355,10 +1466,11 @@ impl McpServer {
             .and_then(Value::as_str)
             .ok_or_else(|| McpError::MissingParameter("query".to_string()))?;
         let mode = args.get("mode").and_then(Value::as_str).unwrap_or("hybrid");
+        let settings = crate::settings::load_or_default(&self.db_path);
         let budget = args
             .get("token_budget")
             .and_then(Value::as_u64)
-            .unwrap_or(2048)
+            .unwrap_or(settings.retrieval.default_token_budget as u64)
             .clamp(128, 32_768) as usize;
         let bundle = build_context_bundle(
             &self.db_path,
@@ -1420,6 +1532,112 @@ impl McpServer {
         Ok(serde_json::to_string_pretty(&crate::runtime::profile(
             include_gpu,
         ))?)
+    }
+
+    fn tool_get_settings(&self) -> Result<String, McpError> {
+        let settings = crate::settings::load(&self.db_path)
+            .map_err(|error| McpError::InvalidRequest(error.to_string()))?;
+        Ok(serde_json::to_string_pretty(&settings)?)
+    }
+
+    fn tool_set_setting(&self, args: &Value) -> Result<String, McpError> {
+        let key = args
+            .get("key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::MissingParameter("key".to_string()))?;
+        let value = args
+            .get("value")
+            .ok_or_else(|| McpError::MissingParameter("value".to_string()))?;
+        let mut settings = crate::settings::load(&self.db_path)
+            .map_err(|error| McpError::InvalidRequest(error.to_string()))?;
+        let previous_device = settings.runtime.compute_device;
+        let invalid = || {
+            McpError::InvalidRequest(format!(
+                "value for setting '{key}' has the wrong JSON type or format"
+            ))
+        };
+        match key {
+            "lexical" => settings.indexing.lexical_index = value.as_bool().ok_or_else(invalid)?,
+            "semantic" => {
+                let enabled = value.as_bool().ok_or_else(invalid)?;
+                settings.indexing.semantic_index = enabled;
+                settings.retrieval.semantic_search = enabled;
+            }
+            "reranking" => settings.retrieval.reranking = value.as_bool().ok_or_else(invalid)?,
+            "graph_expansion" => {
+                settings.retrieval.graph_expansion = value.as_bool().ok_or_else(invalid)?
+            }
+            "structural_prefetch" => {
+                settings.retrieval.structural_prefetch = value.as_bool().ok_or_else(invalid)?
+            }
+            "stack_graphs" => {
+                settings.indexing.stack_graphs = value.as_bool().ok_or_else(invalid)?
+            }
+            "watcher" => settings.indexing.watcher = value.as_bool().ok_or_else(invalid)?,
+            "vfs_shadowing" => {
+                settings.indexing.vfs_shadowing = value.as_bool().ok_or_else(invalid)?
+            }
+            "trace_pinning" => {
+                settings.indexing.execution_trace_pinning = value.as_bool().ok_or_else(invalid)?
+            }
+            "graph_hops" => {
+                settings.retrieval.graph_hops = value.as_u64().ok_or_else(invalid)? as u32
+            }
+            "candidate_limit" => {
+                settings.retrieval.candidate_limit = value.as_u64().ok_or_else(invalid)? as usize
+            }
+            "token_budget" => {
+                settings.retrieval.default_token_budget =
+                    value.as_u64().ok_or_else(invalid)? as usize
+            }
+            "mmr_lambda" => {
+                settings.retrieval.mmr_lambda = value.as_f64().ok_or_else(invalid)? as f32
+            }
+            "compute_device" => {
+                settings.runtime.compute_device = value
+                    .as_str()
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(McpError::InvalidRequest)?
+            }
+            "model_profile" => {
+                settings.runtime.model_profile = value.as_str().ok_or_else(invalid)?.to_string()
+            }
+            "memory_budget_mib" => {
+                settings.runtime.memory_budget_mib = value.as_u64().ok_or_else(invalid)?
+            }
+            "gpu_memory_limit_mib" => {
+                settings.runtime.gpu_memory_limit_mib = value.as_u64().ok_or_else(invalid)?
+            }
+            "model_idle_seconds" => {
+                settings.runtime.model_idle_seconds = value.as_u64().ok_or_else(invalid)?
+            }
+            "theme" => {
+                settings.ui.theme = value
+                    .as_str()
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(McpError::InvalidRequest)?
+            }
+            "motion" => settings.ui.motion = value.as_bool().ok_or_else(invalid)?,
+            "graph_particles" => {
+                settings.ui.graph_particles = value.as_bool().ok_or_else(invalid)?
+            }
+            "graph_labels" => settings.ui.graph_labels = value.as_bool().ok_or_else(invalid)?,
+            _ => {
+                return Err(McpError::InvalidRequest(format!(
+                    "unknown setting key: {key}"
+                )))
+            }
+        }
+        let settings = crate::settings::save(&self.db_path, settings)
+            .map_err(|error| McpError::InvalidRequest(error.to_string()))?;
+        crate::runtime::apply_runtime_settings(&settings);
+        if previous_device != settings.runtime.compute_device {
+            self.embedder.release_idle_resources(Duration::ZERO);
+            self.reranker.release_idle_resources(Duration::ZERO);
+        }
+        Ok(serde_json::to_string_pretty(&settings)?)
     }
 }
 
@@ -1552,9 +1770,55 @@ mod tests {
             "get_graph_snapshot",
             "get_architecture_overview",
             "get_runtime_profile",
+            "get_settings",
+            "set_setting",
         ] {
             assert!(names.contains(&expected), "missing MCP tool {expected}");
         }
+    }
+
+    #[test]
+    fn settings_tools_validate_and_persist_single_key_changes() {
+        let (_directory, server) = test_server();
+        let changed = server.handle_request(request(
+            "tools/call",
+            Some(json!({
+                "name": "set_setting",
+                "arguments": { "key": "graph_hops", "value": 3 }
+            })),
+        ));
+        assert_ne!(changed["result"]["isError"], true);
+
+        let current = server.handle_request(request(
+            "tools/call",
+            Some(json!({ "name": "get_settings", "arguments": {} })),
+        ));
+        let settings = &current["result"]["structuredContent"]["data"];
+        assert_eq!(settings["retrieval"]["graph_hops"], 3);
+        assert_eq!(settings["indexing"]["lexical_index"], true);
+
+        let rejected = server.handle_request(request(
+            "tools/call",
+            Some(json!({
+                "name": "set_setting",
+                "arguments": { "key": "compute_device", "value": "magic" }
+            })),
+        ));
+        assert_eq!(rejected["result"]["isError"], true);
+    }
+
+    #[test]
+    fn resources_include_architecture_and_effective_settings() {
+        let (_directory, server) = test_server();
+        let response = server.handle_request(request("resources/list", None));
+        let uris: Vec<_> = response["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|resource| resource["uri"].as_str())
+            .collect();
+        assert!(uris.contains(&"findex://architecture"));
+        assert!(uris.contains(&"findex://settings"));
     }
 
     #[test]

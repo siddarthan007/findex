@@ -1,6 +1,36 @@
 {
+  "build": {
+    "beforeBuildCommand": "npm run build:bundle"
+  },
   "bundle": {
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/findex"],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/bin/findex": "binaries/findex"
+        }
+      },
+      "rpm": {
+        "files": {
+          "/usr/bin/findex": "binaries/findex"
+        }
+      },
+      "appimage": {
+        "files": {
+          "usr/bin/findex": "binaries/findex"
+        }
+      }
+    },
+    "windows": {
+      "wix": {
+        "fragmentPaths": ["windows/cli-path.wxs"],
+        "componentRefs": ["FindexCliPath"]
+      },
+      "nsis": {
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
   },
   "plugins": {
     "updater": {

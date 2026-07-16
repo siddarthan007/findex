@@ -16,14 +16,19 @@ Linux/macOS source install:
 FINDEX_CUDA=1 ./scripts/install.sh
 ```
 
-Installers build a release CLI, place `findex` under `~/.findex/bin`, acquire both pinned models through the application, switch runtime to cache-only policy, and write `~/.findex/mcp-config.json`.
+The source installers build a release CLI, place `findex` under `~/.findex/bin`, acquire both pinned models through the application, switch runtime to cache-only policy, and write `~/.findex/mcp-config.json`.
+
+The Tauri distribution is the unified human installer: it bundles the same release CLI binary that provides both CLI commands and `findex tui`. Windows NSIS/MSI packages register the install directory on the user PATH; Linux packages map the sidecar to `/usr/bin/findex`. Installing one platform package therefore installs desktop, CLI, and TUI together.
 
 Build the desktop bundle from `crates/findex-tauri`:
 
 ```sh
 npm ci
-npm run tauri:build
+npm run prepare:sidecar
+npm run tauri:build -- --config tauri.updater.conf.json
 ```
+
+For a local unsigned Windows installer smoke test, use `npm run build:installer:unsigned`. Release bundles keep updater artifact signing enabled.
 
 Tagged GitHub releases build locked CLI artifacts and Tauri installers on Windows/Linux. Production signing credentials must be configured in the release environment; do not embed them in the repository.
 
@@ -41,9 +46,9 @@ findex --format json models --profile fast
 
 `balanced` uses the official quantized ONNX artifacts from `jinaai/jina-embeddings-v2-base-code` and `jinaai/jina-reranker-v1-turbo-en`. `quality` uses the same immutable repositories' full-precision ONNX artifacts. Set `FINDEX_MODEL_PROFILE=balanced|quality` for runtime use after acquisition.
 
-Files use the standard Hugging Face content-addressed cache. Concurrent processes reuse completed blobs/snapshots. Production release binaries default to automatic acquisition; debug builds stay network-silent unless explicitly enabled.
+Files use the standard Hugging Face content-addressed cache. Concurrent processes reuse completed blobs/snapshots. Production release binaries default to automatic acquisition; debug builds stay network-silent unless explicitly enabled. When a production host starts without a cached model, Findex serves a dimension-compatible deterministic fallback immediately, downloads on a named background worker, and atomically hot-swaps the pinned ONNX component after verification. It does not block the Tauri main thread.
 
-`FINDEX_MODEL_POLICY=auto|offline|disabled` controls runtime resolution. Explicit `FINDEX_EMBEDDING_MODEL_DIR` and `FINDEX_RERANKER_MODEL_DIR` override bundled models and expect `model.onnx` plus `tokenizer.json`.
+`FINDEX_MODEL_POLICY=auto|offline|disabled` controls runtime resolution. Explicit `FINDEX_EMBEDDING_MODEL_DIR` and `FINDEX_RERANKER_MODEL_DIR` override bundled models and expect `model.onnx` plus `tokenizer.json`. A hot-swap that changes the embedding fingerprint causes the vector index to rebuild before semantic results are mixed.
 
 Long-running hosts unload ONNX sessions after `FINDEX_MODEL_IDLE_SECS` (default 300; `0` disables). The next inference lazily reloads from cache. This releases inference arenas but not the on-disk cache.
 
@@ -62,6 +67,16 @@ Release CI requires `FINDEX_UPDATER_PUBLIC_KEY`, `TAURI_SIGNING_PRIVATE_KEY`, an
 
 ## CPU and RAM
 
+Persisted settings are the preferred interactive controls:
+
+```sh
+findex settings show
+findex settings set --candidates 32 --graph-hops 1 --compute auto
+findex settings set --lexical true --semantic true --reranking true
+```
+
+Environment variables below remain deployment overrides and take precedence where documented.
+
 - `FINDEX_RAYON_THREADS`: parsing/indexing pool. Default leaves two logical CPUs for the OS and other agents.
 - `FINDEX_ONNX_THREADS`: ONNX CPU intra-op pool, default half the Rayon pool capped at 8.
 - `FINDEX_MEMORY_BUDGET_MB`: process policy target reported by diagnostics.
@@ -75,7 +90,7 @@ Do not maximize Rayon and ONNX pools independently; that oversubscribes CPUs and
 
 Compile with the `cuda` feature and install a compatible ONNX Runtime/CUDA/cuDNN stack. Runtime probes CUDA and falls back to CPU when registration fails.
 
-- `FINDEX_ONNX_DEVICE=auto|cpu`: force CPU or allow CUDA.
+- `FINDEX_ONNX_DEVICE=auto|cpu|cuda`: select provider policy; incompatible CUDA registration falls back to CPU.
 - `FINDEX_CUDA_DEVICE_ID`: CUDA ordinal, default 0.
 - `FINDEX_GPU_MEMORY_LIMIT_MB`: CUDA arena cap. Default uses at most 60% of currently free memory after headroom and never more than 4 GiB.
 

@@ -13,12 +13,15 @@ use findex_core::intelligence::{
 use findex_core::search::local_embedder::create_embedder;
 use findex_core::search::rerank::{create_reranker, Reranker};
 use findex_core::search::vector::Embedder;
+use findex_core::settings::FindexSettings;
 use findex_core::storage::{Storage, Symbol};
-use findex_core::{ingest_codebase, search_codebase_with_components};
+use findex_core::{
+    ingest_codebase_with_options, search_codebase_with_options, IngestionOptions, SearchOptions,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{AppHandle, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tower_http::cors::CorsLayer;
@@ -29,6 +32,7 @@ struct AppState {
     storage: Arc<Storage>,
     reranker: Arc<dyn Reranker>,
     embedder: Arc<dyn Embedder>,
+    settings: Arc<RwLock<FindexSettings>>,
     api_url: String,
     api_token: String,
 }
@@ -137,7 +141,12 @@ fn stats(state: &AppState) -> Result<StatsView, String> {
 }
 
 fn search(state: &AppState, request: SearchRequest) -> Result<Vec<SearchResult>, String> {
-    search_codebase_with_components(
+    let settings = state
+        .settings
+        .read()
+        .map_err(|error| error.to_string())?
+        .clone();
+    search_codebase_with_options(
         &state.db_path,
         &state.storage,
         &request.query,
@@ -145,6 +154,7 @@ fn search(state: &AppState, request: SearchRequest) -> Result<Vec<SearchResult>,
         Some(state.reranker.as_ref()),
         state.embedder.as_ref(),
         request.limit.clamp(1, 100),
+        SearchOptions::from(&settings),
     )
     .map(|results| {
         results
@@ -207,9 +217,61 @@ fn inspect_impact(state: State<'_, AppState>, symbol_id: String) -> Result<Impac
 
 #[tauri::command]
 fn reindex(state: State<'_, AppState>, root: String) -> Result<Value, String> {
-    ingest_codebase(root, &state.db_path, &state.storage)
-        .map(|stats| json!(stats))
+    let settings = state
+        .settings
+        .read()
+        .map_err(|error| error.to_string())?
+        .clone();
+    ingest_codebase_with_options(
+        root,
+        &state.db_path,
+        &state.storage,
+        IngestionOptions {
+            build_lexical_index: settings.indexing.lexical_index,
+            build_vector_index: false,
+            resolve_stack_graphs: settings.indexing.stack_graphs,
+        },
+    )
+    .map(|stats| json!(stats))
+    .map_err(|error| error.to_string())
+}
+
+fn read_settings(state: &AppState) -> Result<FindexSettings, String> {
+    state
+        .settings
+        .read()
+        .map(|settings| settings.clone())
         .map_err(|error| error.to_string())
+}
+
+fn persist_settings(state: &AppState, settings: FindexSettings) -> Result<FindexSettings, String> {
+    let previous = read_settings(state)?;
+    let settings =
+        findex_core::settings::save(&state.db_path, settings).map_err(|error| error.to_string())?;
+    findex_core::runtime::apply_runtime_settings(&settings);
+    if previous.runtime.compute_device != settings.runtime.compute_device {
+        state
+            .embedder
+            .release_idle_resources(std::time::Duration::ZERO);
+        state
+            .reranker
+            .release_idle_resources(std::time::Duration::ZERO);
+    }
+    *state.settings.write().map_err(|error| error.to_string())? = settings.clone();
+    Ok(settings)
+}
+
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Result<FindexSettings, String> {
+    read_settings(&state)
+}
+
+#[tauri::command]
+fn set_settings(
+    state: State<'_, AppState>,
+    settings: FindexSettings,
+) -> Result<FindexSettings, String> {
+    persist_settings(&state, settings)
 }
 
 #[tauri::command]
@@ -324,6 +386,18 @@ async fn api_impact(
     })
 }
 
+async fn api_settings(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Response {
+    authorized_json(&state, &headers, || read_settings(&state))
+}
+
+async fn api_update_settings(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(settings): Json<FindexSettings>,
+) -> Response {
+    authorized_json(&state, &headers, || persist_settings(&state, settings))
+}
+
 fn authorized_json<T: Serialize>(
     state: &AppState,
     headers: &HeaderMap,
@@ -341,7 +415,7 @@ fn authorized_json<T: Serialize>(
     }
 }
 
-async fn serve_api(state: Arc<AppState>, bind: String) -> Result<(), String> {
+async fn serve_api(state: Arc<AppState>, listener: std::net::TcpListener) -> Result<(), String> {
     let cors = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([
@@ -362,11 +436,11 @@ async fn serve_api(state: Arc<AppState>, bind: String) -> Result<(), String> {
         .route("/api/query", post(api_query))
         .route("/api/ast", post(api_ast))
         .route("/api/impact", post(api_impact))
+        .route("/api/settings", get(api_settings).post(api_update_settings))
         .layer(cors)
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .map_err(|error| error.to_string())?;
+    let listener =
+        tokio::net::TcpListener::from_std(listener).map_err(|error| error.to_string())?;
     axum::serve(listener, app)
         .await
         .map_err(|error| error.to_string())
@@ -377,11 +451,25 @@ fn main() {
     let db_path = std::env::var("FINDEX_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(".findex_db"));
-    let port = std::env::var("FINDEX_DASHBOARD_PORT")
+    let requested_port = std::env::var("FINDEX_DASHBOARD_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(37_421);
-    let bind = format!("127.0.0.1:{port}");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", requested_port)).or_else(|error| {
+        eprintln!(
+            "Findex dashboard port {requested_port} is unavailable ({error}); using an ephemeral loopback port"
+        );
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+    })
+    .expect("failed to bind the loopback dashboard API");
+    listener
+        .set_nonblocking(true)
+        .expect("failed to configure the loopback dashboard listener");
+    let bind = listener
+        .local_addr()
+        .expect("failed to read dashboard listener address");
+    let settings = findex_core::settings::load_or_default(&db_path);
+    findex_core::runtime::apply_runtime_settings(&settings);
     let reranker = create_reranker();
     let embedder = create_embedder(128);
     findex_core::runtime::start_model_idle_janitor(&embedder, &reranker);
@@ -390,20 +478,25 @@ fn main() {
         storage: Arc::new(Storage::open(&db_path).expect("failed to open findex database")),
         reranker,
         embedder,
+        settings: Arc::new(RwLock::new(settings)),
         api_url: format!("http://{bind}"),
         api_token: uuid::Uuid::new_v4().to_string(),
     };
     let server_state = Arc::new(state.clone());
-    let updater_plugin = tauri_plugin_updater::Builder::new()
-        .pubkey(findex_core::updater::updater_public_key().unwrap_or_default())
-        .build();
+    let updater_plugin = findex_core::updater::updater_public_key()
+        .map(|public_key| {
+            tauri_plugin_updater::Builder::new()
+                .pubkey(public_key)
+                .build()
+        })
+        .unwrap_or_else(|| tauri_plugin_updater::Builder::new().build());
     tauri::Builder::default()
         .plugin(updater_plugin)
         .manage(state)
         .manage(PendingDesktopUpdate::default())
         .setup(move |_app| {
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = serve_api(server_state, bind).await {
+                if let Err(error) = serve_api(server_state, listener).await {
                     eprintln!("Findex dashboard API stopped: {error}");
                 }
             });
@@ -419,6 +512,8 @@ fn main() {
             run_graph_query,
             inspect_impact,
             reindex,
+            get_settings,
+            set_settings,
             check_for_update,
             install_update
         ])

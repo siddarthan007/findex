@@ -1,6 +1,6 @@
 # Implementation plan status
 
-Updated: 2026-07-15
+Updated: 2026-07-16
 
 This file records what is implemented from `implementation_plan.md` and keeps production behavior separate from benchmark-gated research.
 
@@ -56,6 +56,19 @@ This file records what is implemented from `implementation_plan.md` and keeps pr
 - TUI: six views, editable `ratatui-textarea` inputs, structured tabs, tree/scroll inspectors, source highlighting, overlay help, toasts, logger diagnostics, optional terminal images, Nord palette, Nerd Font/ASCII modes, debounced search, graph canvas/query, memory/GPU panels, and the supplied eight-frame ingestion sprite tied to a real non-blocking reindex. Reduced-motion mode disables transitions and holds the first sprite frame.
 - Tauri: React/Vite UI, lazy WebGL 3D graph, GitHub-style tokens, search/AST/query/architecture/runtime views, and a per-process-token-protected local Axum API.
 - Production delivery: three immutable model profiles, shared cache/offline policies, fingerprinted vector-index migrations, automatic model acquisition, dynamic-length batched reranking, idle ONNX session release, signed consent-gated CLI/TUI/Tauri updaters, locked GitHub CI/release jobs, and validated Windows NSIS/MSI bundles.
+
+## Wave 3 production hardening (2026-07-16)
+
+- Fixed Tauri updater initialization by replacing the invalid `plugins.updater: null` state with a deserializable configuration and avoiding an empty runtime public-key override. A real `tauri dev` process now reaches the event loop without the startup panic.
+- Added versioned index-local settings shared by CLI, TUI, Tauri/Axum, MCP, ingestion, retrieval, and model runtime. Optional indexing/retrieval/VFS/trace/watcher/GPU/UI stages are switchable without rebuilds and validated/clamped before persistence.
+- Search reports requested versus effective retrieval mode and rejects the invalid state where both lexical and semantic retrieval are disabled. Rerank pool, graph hops, graph expansion, structural prefetch, MMR, compute provider, RAM/VRAM policy, and idle release now obey runtime settings.
+- Fixed repository graph snapshots/architecture metrics dropping parser edges whose destination was a symbol name rather than an ID. Batch resolution now uses exact IDs, unique/qualified names, and file/path locality with explicit confidence/evidence metadata.
+- Graph-augmented retrieval now ranks typed bidirectional neighbors with hop decay, execution-trace/Stack-Graph evidence boosts, fan-out bounds, and logarithmic degree penalty so God nodes do not flood context.
+- Production model acquisition is cache-first and asynchronous. Missing embedding/reranking models use dimension-compatible deterministic fallbacks while background workers download pinned artifacts and hot-swap verified ONNX sessions; fingerprint mismatches rebuild vectors before mixing representations.
+- The desktop graph now supports search/focus, fit, pin, pause, category/edge/confidence filters, 1-3 hop neighborhoods, selected-edge direction/particles, dragging, keyboard controls, and light/dark-aware WebGL rendering. Settings and runtime views expose effective compute/memory policy.
+- The TUI now provides GitHub-light/Nord-dark themes plus typed-edge filters, 0-4 hop focus, selection, pan, zoom, fit, pin/inspection, and motion controls while preserving the supplied smooth ingestion animation.
+- Unified Tauri packages include the release `findex` sidecar (CLI plus TUI). NSIS and WiX add/remove the user PATH safely; DEB/RPM/AppImage mappings expose `/usr/bin/findex`. An actual unsigned NSIS bundle completed successfully after validating the uninstall hook.
+- MCP adds structured search output, `get_settings`, `set_setting`, `findex://architecture`, and `findex://settings`. Runtime gates reject disabled VFS, micro-compile, trace/taint pinning, and structural-prefetch calls explicitly.
 
 ## Language and bounded-context hardening
 

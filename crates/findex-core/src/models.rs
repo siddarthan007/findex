@@ -5,11 +5,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const MINILM_EMBEDDING_REVISION: &str = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41";
 const MINILM_RERANKER_REVISION: &str = "c5ee24cb16019beea0893ab7796b1df96625c6b8";
 const JINA_CODE_REVISION: &str = "516f4baf13dec4ddddda8631e019b5737c8bc250";
 const JINA_RERANKER_REVISION: &str = "b8c14f4e723d9e0aab4732a7b7b93741eeeb77c2";
+static RUNTIME_MODEL_PROFILE: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,7 +177,20 @@ pub fn model_profile() -> ModelProfile {
     std::env::var("FINDEX_MODEL_PROFILE")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or_default()
+        .unwrap_or_else(|| match RUNTIME_MODEL_PROFILE.load(Ordering::Relaxed) {
+            2 => ModelProfile::Balanced,
+            3 => ModelProfile::Quality,
+            _ => ModelProfile::Fast,
+        })
+}
+
+pub fn set_runtime_model_profile(profile: &str) {
+    let value = match profile.parse::<ModelProfile>().unwrap_or_default() {
+        ModelProfile::Fast => 1,
+        ModelProfile::Balanced => 2,
+        ModelProfile::Quality => 3,
+    };
+    RUNTIME_MODEL_PROFILE.store(value, Ordering::Relaxed);
 }
 
 /// Ensure one pinned model and tokenizer exist in the standard Hugging Face

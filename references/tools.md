@@ -10,7 +10,7 @@ Use exact JSON property names. Limits and budgets are safety controls, not sugge
 { "query": "request authentication", "mode": "hybrid", "limit": 10 }
 ```
 
-Returns ranked symbols with exact locations. Use lexical for identifiers/error text, hybrid for behavior, semantic for vocabulary mismatch. `regex:<pattern>` is lexical-only. Task mode is optional.
+Returns structured JSON with requested/effective mode, executed stages, and ranked symbols with exact locations. Use lexical for identifiers/error text, hybrid for behavior, semantic for vocabulary mismatch. `regex:<pattern>` is lexical-only. If one retrieval leg is disabled, confirm the reported fallback rather than assuming the requested mode ran. Task mode is optional.
 
 `get_context_bundle`
 
@@ -174,6 +174,22 @@ Parses the shadow without disk I/O or index mutation and returns versioned symbo
 
 ## Index and runtime
 
+`get_settings`
+
+```json
+{}
+```
+
+Returns persisted indexing, retrieval, compute, memory, and UI gates. Call it once before a workflow that depends on optional stages.
+
+`set_setting`
+
+```json
+{ "key": "graph_hops", "value": 2 }
+```
+
+Changes one validated value without resetting unrelated controls. Keys include `lexical`, `semantic`, `reranking`, `graph_expansion`, `structural_prefetch`, `stack_graphs`, `watcher`, `vfs_shadowing`, `trace_pinning`, graph/candidate/token limits, compute/model/memory controls, and appearance controls. This is a persistent mutation: use it only when the user requested the policy change.
+
 `get_stats`
 
 ```json
@@ -208,7 +224,7 @@ Returns CPU pools, RAM/process budgets, model policy, ONNX threads, CUDA build s
 
 ## MCP resources and prompts
 
-Read `findex://repo/map`, `findex://tree`, `findex://stats`, or `findex://file/<encoded-path>` when a reusable read-only artifact is more appropriate than a tool call.
+Read `findex://repo/map`, `findex://tree`, `findex://stats`, `findex://architecture`, `findex://settings`, or `findex://file/<encoded-path>` when a reusable read-only artifact is more appropriate than a tool call.
 
 Available prompts are `understand_symbol`, `plan_refactor`, and `trace_call`. They are starting recipes, not substitutes for task-specific budgets and verification.
 
