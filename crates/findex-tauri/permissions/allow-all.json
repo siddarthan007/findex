@@ -1,0 +1,29 @@
+{
+  "identifier": "allow-all-commands",
+  "description": "Allows all custom commands in the main binary",
+  "commands": [
+    "get_api_config",
+    "take_pending_deep_link",
+    "get_graph_data",
+    "get_architecture",
+    "search_symbols",
+    "get_stats",
+    "get_ast",
+    "run_graph_query",
+    "inspect_impact",
+    "reindex",
+    "get_settings",
+    "set_settings",
+    "auth_login",
+    "auth_status",
+    "auth_logout",
+    "telemetry_status",
+    "telemetry_flush",
+    "list_models",
+    "download_model_profile",
+    "check_for_update",
+    "install_update",
+    "select_directory",
+    "take_cli_index_dir"
+  ]
+}

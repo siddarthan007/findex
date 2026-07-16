@@ -34,6 +34,7 @@ export interface Stats {
   vectors: number;
   merkle_root?: string;
   stack_graphs?: { resolved_edges: number; timed_out: boolean; message: string; published_rule_files?: number; bundled_rule_files?: number };
+  index_root?: string;
 }
 
 export interface SymbolRecord {

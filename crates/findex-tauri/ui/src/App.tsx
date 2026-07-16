@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   Activity, ArrowDownToLine, Braces, Boxes, Check, Cpu, Database, Download, FileCode2, GitBranch,
   CircleUserRound, LogIn, LogOut, Moon, Network, RotateCcw, Search, Send, Settings2, ShieldCheck,
-  SquareTerminal, Sun, Workflow, X
+  SquareTerminal, Sun, Workflow, X, FolderOpen
 } from 'lucide-react';
 import { api } from './api';
 import ActivityGlyph from './ActivityGlyph';
@@ -45,17 +45,33 @@ function App() {
   const [installingUpdate, setInstallingUpdate] = useState(false);
 
   useEffect(() => {
-    Promise.all([api.graph(), api.stats(), api.settings(), api.authStatus().catch(() => null), api.telemetryStatus().catch(() => null)])
-      .then(([nextGraph, nextStats, nextSettings, nextProfile, nextTelemetry]) => {
+    const init = async () => {
+      try {
+        const cliIndexDir = await api.takeCliIndexDir();
+        if (cliIndexDir) {
+          setBusy(true);
+          await api.reindex(cliIndexDir);
+        }
+        const [nextGraph, nextStats, nextSettings, nextProfile, nextTelemetry] = await Promise.all([
+          api.graph(),
+          api.stats(),
+          api.settings(),
+          api.authStatus().catch(() => null),
+          api.telemetryStatus().catch(() => null),
+        ]);
         setGraph(nextGraph);
         setStats(nextStats);
         setSettings(nextSettings);
         setProfile(nextProfile);
         setTelemetry(nextTelemetry);
         setSelected(nextGraph.nodes[0] ?? null);
-      })
-      .catch(cause => setError(String(cause)))
-      .finally(() => setBusy(false));
+      } catch (cause) {
+        setError(String(cause));
+      } finally {
+        setBusy(false);
+      }
+    };
+    void init();
   }, []);
 
   useEffect(() => {
@@ -238,10 +254,37 @@ function App() {
     }
   }
 
+  async function handleChooseCodebase() {
+    try {
+      const selectedFolder = await api.selectDirectory();
+      if (!selectedFolder) return;
+      setBusy(true);
+      setError('');
+      await api.reindex(selectedFolder);
+      const [nextGraph, nextStats, nextSettings] = await Promise.all([
+        api.graph(),
+        api.stats(),
+        api.settings()
+      ]);
+      setGraph(nextGraph);
+      setStats(nextStats);
+      setSettings(nextSettings);
+      setSelected(nextGraph.nodes[0] ?? null);
+    } catch (cause) {
+      setError(`Failed to change directory: ${String(cause)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
         <div className="brand"><Boxes size={16} strokeWidth={2.2} /><span>findex</span><b>local</b></div>
+        <button className="folder-chip" onClick={handleChooseCodebase} title={stats?.index_root || "Choose codebase folder..."} aria-label="Choose codebase directory">
+          <FolderOpen size={13} />
+          <span>{stats?.index_root ? compactPath(stats.index_root) : "Choose folder..."}</span>
+        </button>
         <form className="command-search" onSubmit={runSearch}>
           <Search size={15} />
           <input value={searchInput} onChange={event => setSearchInput(event.target.value)} placeholder="Search behavior, symbol, path…" aria-label="Search the codebase" />

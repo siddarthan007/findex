@@ -79,6 +79,10 @@ code, pre, kbd, .score, .location, .statusbar { font-family: "SFMono-Regular", C
 .update-chip { margin-left: auto; height: 28px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--successColor-border); border-radius: var(--radius); background: var(--successColor-muted); color: var(--successColor-fg); font-size: 10px; font-weight: 600; cursor: pointer; }
 .update-chip + .top-metrics { margin-left: 0; }
 .update-chip:hover { border-color: var(--successColor-fg); }
+.folder-chip { height: 28px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid var(--borderColor-default); border-radius: var(--radius); background: var(--bgColor-default); color: var(--fgColor-muted); font-size: 11px; cursor: pointer; max-width: 240px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; transition: color 100ms, background 100ms, border-color 100ms; }
+.folder-chip:hover { color: var(--fgColor-default); background: var(--bgColor-emphasis); border-color: var(--fgColor-subtle); }
+.folder-chip svg { color: var(--accentColor-fg); flex-shrink: 0; }
+.folder-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-button { width: 28px; height: 28px; flex: none; display: grid; place-items: center; padding: 0; border: 1px solid var(--borderColor-default); border-radius: var(--radius); background: var(--bgColor-default); color: var(--fgColor-muted); cursor: pointer; }
 .icon-button:hover { color: var(--fgColor-default); background: var(--bgColor-emphasis); }
 .update-chip + .icon-button, .command-search + .icon-button { margin-left: auto; }
