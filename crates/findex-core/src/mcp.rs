@@ -2149,7 +2149,7 @@ mod tests {
         let (_directory, server) = test_server();
         let response = server.handle_request(request("initialize", Some(json!({}))));
         assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
-        assert_eq!(response["result"]["serverInfo"]["version"], "3.1.1");
+        assert_eq!(response["result"]["serverInfo"]["version"], "3.1.5");
         assert!(response["result"]["capabilities"]["tools"].is_object());
         assert!(response["result"]["capabilities"]["resources"].is_object());
         assert!(response["result"]["capabilities"]["prompts"].is_object());
