@@ -3,20 +3,20 @@ use std::collections::HashMap;
 /// Combines the results of lexical and vector search using Reciprocal Rank Fusion (RRF).
 /// RRF score formula: score(doc) = sum_{m in models} (1 / (60 + rank_m(doc)))
 pub fn rrf_merge(lexical: &[String], vector: &[String], limit: usize) -> Vec<(String, f32)> {
+    rrf_merge_rankings(&[lexical, vector], limit)
+}
+
+/// Fuse any number of independent rankings. Keeping raw lexical, normalized
+/// code terms, and semantic similarity as separate legs prevents one noisy
+/// natural-language query from dominating every retrieval signal.
+pub fn rrf_merge_rankings(rankings: &[&[String]], limit: usize) -> Vec<(String, f32)> {
     let mut scores = HashMap::new();
-
-    // Ingest lexical rankings
-    for (index, id) in lexical.iter().enumerate() {
-        let rank = index + 1;
-        let rrf_score = 1.0 / (60.0 + rank as f32);
-        *scores.entry(id.clone()).or_insert(0.0) += rrf_score;
-    }
-
-    // Ingest vector rankings
-    for (index, id) in vector.iter().enumerate() {
-        let rank = index + 1;
-        let rrf_score = 1.0 / (60.0 + rank as f32);
-        *scores.entry(id.clone()).or_insert(0.0) += rrf_score;
+    for ranking in rankings {
+        for (index, id) in ranking.iter().enumerate() {
+            let rank = index + 1;
+            let rrf_score = 1.0 / (60.0 + rank as f32);
+            *scores.entry(id.clone()).or_insert(0.0) += rrf_score;
+        }
     }
 
     // Convert to vector and sort descending by combined RRF score

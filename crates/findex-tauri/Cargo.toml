@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 findex-core = { path = "../findex-core" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2.10.1"
 serde = { workspace = true }
 serde_json = { workspace = true }

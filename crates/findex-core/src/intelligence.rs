@@ -7,7 +7,7 @@ use crate::structural_locality::{predict_context, PredictContextOptions};
 use crate::token_budget::count_tokens;
 use crate::{get_codebase_skeleton, IngestionError};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -157,6 +157,33 @@ pub struct ArchitectureOverview {
     pub contracts: Vec<ArchitectureSymbol>,
     pub hubs: Vec<ArchitectureHub>,
     pub cross_file_edges: usize,
+    /// Hierarchical directory/module summaries, cheap enough for first-turn orientation.
+    pub modules: Vec<ArchitectureModule>,
+    /// Deterministic weakly-connected graph communities for GraphRAG-style routing.
+    pub communities: Vec<ArchitectureCommunity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchitectureModule {
+    pub path: String,
+    pub files: usize,
+    pub symbols: usize,
+    pub dominant_layer: String,
+    pub dominant_language: String,
+    /// Deterministic, source-free hierarchy summary for low-token global orientation.
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchitectureCommunity {
+    pub id: String,
+    pub symbols: usize,
+    pub files: usize,
+    pub internal_edges: usize,
+    pub boundary_edges: usize,
+    pub hubs: Vec<ArchitectureSymbol>,
+    /// Deterministic summary from indexed roles and hub names; no LLM indexing cost.
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +281,159 @@ pub fn architecture_overview(storage: &Storage) -> Result<ArchitectureOverview, 
     hubs.sort_by_key(|hub| std::cmp::Reverse(hub.incoming + hub.outgoing));
     hubs.truncate(32);
 
+    let mut module_files: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut module_symbols: HashMap<String, usize> = HashMap::new();
+    let mut module_layers: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let mut module_languages: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for file in &files {
+        let path = file.path.to_string_lossy();
+        let module = module_for_path(&path);
+        module_files
+            .entry(module.clone())
+            .or_default()
+            .insert(path.to_string());
+        *module_layers
+            .entry(module.clone())
+            .or_default()
+            .entry(layer_for_path(&path).to_string())
+            .or_default() += 1;
+        *module_languages
+            .entry(module)
+            .or_default()
+            .entry(language_for_path(&path).to_string())
+            .or_default() += 1;
+    }
+    for symbol in &symbols {
+        *module_symbols
+            .entry(module_for_path(&symbol.file_path))
+            .or_default() += 1;
+    }
+    let dominant = |counts: Option<&HashMap<String, usize>>| {
+        counts
+            .and_then(|counts| {
+                counts
+                    .iter()
+                    .max_by_key(|(name, count)| (*count, std::cmp::Reverse(*name)))
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_else(|| "other".to_string())
+    };
+    let mut modules: Vec<_> = module_files
+        .iter()
+        .map(|(path, files)| {
+            let symbols = module_symbols.get(path).copied().unwrap_or_default();
+            let dominant_layer = dominant(module_layers.get(path));
+            let dominant_language = dominant(module_languages.get(path));
+            ArchitectureModule {
+                path: path.clone(),
+                files: files.len(),
+                symbols,
+                summary: format!(
+                    "{dominant_language} {dominant_layer} module {path}: {symbols} symbols across {} files",
+                    files.len()
+                ),
+                dominant_layer,
+                dominant_language,
+            }
+        })
+        .collect();
+    modules.sort_by_key(|module| std::cmp::Reverse((module.symbols, module.files)));
+    modules.truncate(64);
+
+    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+    for edge in &resolved_edges {
+        adjacency
+            .entry(edge.source.clone())
+            .or_default()
+            .push(edge.target.clone());
+        adjacency
+            .entry(edge.target.clone())
+            .or_default()
+            .push(edge.source.clone());
+    }
+    let mut unseen: BTreeSet<String> = symbols.iter().map(|symbol| symbol.id.clone()).collect();
+    let mut components = Vec::<Vec<String>>::new();
+    while let Some(seed) = unseen.pop_first() {
+        let mut queue = VecDeque::from([seed]);
+        let mut members = Vec::new();
+        while let Some(current) = queue.pop_front() {
+            members.push(current.clone());
+            for neighbor in adjacency.get(&current).into_iter().flatten() {
+                if unseen.remove(neighbor) {
+                    queue.push_back(neighbor.clone());
+                }
+            }
+        }
+        if members.len() > 1 {
+            components.push(members);
+        }
+    }
+    components.sort_by_key(|component| std::cmp::Reverse(component.len()));
+    components.truncate(32);
+    let mut communities = Vec::with_capacity(components.len());
+    for (index, members) in components.into_iter().enumerate() {
+        let member_set: BTreeSet<_> = members.iter().map(String::as_str).collect();
+        let mut community_files = BTreeSet::new();
+        let mut community_hubs = Vec::new();
+        let mut community_kinds: HashMap<String, usize> = HashMap::new();
+        for id in &members {
+            if let Some(symbol) = by_id.get(id.as_str()) {
+                community_files.insert(normalized_path_key(&symbol.file_path));
+                *community_kinds.entry(symbol.kind.clone()).or_default() += 1;
+                community_hubs.push(ArchitectureHub {
+                    symbol: to_summary(symbol),
+                    incoming: incoming.get(id.as_str()).copied().unwrap_or_default(),
+                    outgoing: outgoing.get(id.as_str()).copied().unwrap_or_default(),
+                });
+            }
+        }
+        community_hubs.sort_by_key(|hub| std::cmp::Reverse(hub.incoming + hub.outgoing));
+        let internal_edges = resolved_edges
+            .iter()
+            .filter(|edge| {
+                member_set.contains(edge.source.as_str())
+                    && member_set.contains(edge.target.as_str())
+            })
+            .count();
+        let boundary_edges = resolved_edges
+            .iter()
+            .filter(|edge| {
+                member_set.contains(edge.source.as_str())
+                    ^ member_set.contains(edge.target.as_str())
+            })
+            .count();
+        let dominant_kind = dominant(Some(&community_kinds));
+        let hub_names = community_hubs
+            .iter()
+            .take(3)
+            .map(|hub| hub.symbol.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let summary = format!(
+            "{}-symbol {dominant_kind} community across {} files; hubs: {}",
+            members.len(),
+            community_files.len(),
+            if hub_names.is_empty() {
+                "none"
+            } else {
+                &hub_names
+            }
+        );
+        communities.push(ArchitectureCommunity {
+            id: format!("community-{}", index + 1),
+            symbols: members.len(),
+            files: community_files.len(),
+            internal_edges,
+            boundary_edges,
+            hubs: community_hubs
+                .into_iter()
+                .take(6)
+                .map(|hub| hub.symbol)
+                .collect(),
+            summary,
+        });
+    }
+
     Ok(ArchitectureOverview {
         files: files.len(),
         symbols: symbols.len(),
@@ -265,7 +445,23 @@ pub fn architecture_overview(storage: &Storage) -> Result<ArchitectureOverview, 
         contracts,
         hubs,
         cross_file_edges,
+        modules,
+        communities,
     })
+}
+
+fn module_for_path(path: &str) -> String {
+    let normalized = normalized_path_key(path);
+    let parts: Vec<_> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() <= 1 {
+        return "(root)".to_string();
+    }
+    let parents = &parts[..parts.len() - 1];
+    let start = parents.len().saturating_sub(2);
+    parents[start..].join("/")
 }
 
 fn language_for_path(path: &str) -> &'static str {
@@ -775,7 +971,9 @@ pub fn graph_snapshot(storage: &Storage, limit: usize) -> Result<GraphSnapshot, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::DiscoveredFile;
     use crate::storage::Edge;
+    use std::path::PathBuf;
 
     fn symbol(id: &str, file_path: &str, parent_id: Option<&str>) -> Symbol {
         Symbol {
@@ -861,5 +1059,41 @@ mod tests {
         assert_eq!(snapshot.links[0].target, "src/lib.rs#run");
         assert_eq!(snapshot.links[0].evidence, "unique_name");
         assert!(snapshot.links[0].confidence >= 0.9);
+    }
+
+    #[test]
+    fn architecture_summaries_are_deterministic_and_source_free() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(directory.path()).unwrap();
+        storage
+            .save_file(&DiscoveredFile {
+                path: PathBuf::from("crates/core/src/lib.rs"),
+                hash: [7; 32],
+                size: 64,
+            })
+            .unwrap();
+        storage
+            .save_symbols_batch(&[
+                symbol("auth_service", "crates/core/src/lib.rs", None),
+                symbol("api_client", "crates/core/src/api.rs", None),
+            ])
+            .unwrap();
+        storage
+            .save_edge(&Edge {
+                src: "auth_service".into(),
+                dst: "api_client".into(),
+                edge_type: EdgeType::Calls,
+                ..Edge::default()
+            })
+            .unwrap();
+
+        let first = architecture_overview(&storage).unwrap();
+        let second = architecture_overview(&storage).unwrap();
+
+        assert_eq!(first.modules[0].summary, second.modules[0].summary);
+        assert!(first.modules[0].summary.contains("Rust core module"));
+        assert!(first.communities[0]
+            .summary
+            .contains("2-symbol Function community"));
     }
 }

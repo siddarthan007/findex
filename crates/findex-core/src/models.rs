@@ -85,6 +85,19 @@ pub struct ResolvedModel {
     pub tokenizer_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelStatus {
+    pub kind: ModelKind,
+    pub profile: ModelProfile,
+    pub repository: String,
+    pub revision: String,
+    pub artifact: String,
+    pub installed: bool,
+    pub model_path: Option<PathBuf>,
+    pub tokenizer_path: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     #[error("Hugging Face model acquisition failed for {repository}: {source}")]
@@ -155,6 +168,43 @@ fn spec(profile: ModelProfile, kind: ModelKind) -> ModelSpec {
             artifact: "onnx/model.onnx",
         },
     }
+}
+
+/// Return the immutable production catalog and local-cache state without
+/// contacting the network. Cache errors are data so one missing profile does
+/// not hide the status of the others.
+pub fn model_catalog_status() -> Vec<ModelStatus> {
+    let mut statuses = Vec::with_capacity(ModelProfile::ALL.len() * 2);
+    for profile in ModelProfile::ALL {
+        for kind in [ModelKind::Embedding, ModelKind::Reranker] {
+            let descriptor = spec(profile, kind);
+            match ensure_model_for_profile(kind, profile, true) {
+                Ok(model) => statuses.push(ModelStatus {
+                    kind,
+                    profile,
+                    repository: model.repository,
+                    revision: model.revision,
+                    artifact: model.artifact,
+                    installed: true,
+                    model_path: Some(model.model_path),
+                    tokenizer_path: Some(model.tokenizer_path),
+                    error: None,
+                }),
+                Err(error) => statuses.push(ModelStatus {
+                    kind,
+                    profile,
+                    repository: descriptor.repository(),
+                    revision: descriptor.revision.to_string(),
+                    artifact: descriptor.artifact.to_string(),
+                    installed: false,
+                    model_path: None,
+                    tokenizer_path: None,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+    }
+    statuses
 }
 
 /// Production release binaries self-provision by default. Debug/test builds stay

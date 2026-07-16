@@ -12,7 +12,8 @@ $ReleaseBase = "https://github.com/$Repository/releases/download/v$Version"
 
 $targets = @(
     @{ Key = "windows-x86_64"; Archive = "findex-windows-x86_64.zip"; Binary = "findex.exe" },
-    @{ Key = "linux-x86_64"; Archive = "findex-linux-x86_64.zip"; Binary = "findex" }
+    @{ Key = "linux-x86_64"; Archive = "findex-linux-x86_64.zip"; Binary = "findex" },
+    @{ Key = "macos-aarch64"; Archive = "findex-macos-aarch64.zip"; Binary = "findex" }
 )
 
 $platforms = [ordered]@{}

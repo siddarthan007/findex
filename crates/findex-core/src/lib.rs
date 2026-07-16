@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 pub mod discovery;
 pub mod graph_pruning;
 pub mod graph_query;
@@ -33,7 +35,7 @@ use thiserror::Error;
 use crate::discovery::{discover_files, DiscoveredFile};
 use crate::parser::{parse_code, ParserError};
 use crate::search::chunker::chunk_symbol;
-use crate::search::hybrid::rrf_merge;
+use crate::search::hybrid::rrf_merge_rankings;
 use crate::search::lexical::{LexicalError, LexicalIndex};
 use crate::search::local_embedder::create_embedder;
 use crate::search::mmr::mmr_diversify;
@@ -678,6 +680,9 @@ pub struct SearchOptions {
     pub graph_hops: u32,
     pub candidate_limit: usize,
     pub mmr_lambda: f32,
+    pub predictive_query_cache: bool,
+    pub query_cache_entries: usize,
+    pub query_cache_ttl_seconds: u64,
 }
 
 impl Default for SearchOptions {
@@ -690,6 +695,9 @@ impl Default for SearchOptions {
             graph_hops: 1,
             candidate_limit: rerank_candidate_limit(),
             mmr_lambda: 0.75,
+            predictive_query_cache: true,
+            query_cache_entries: 128,
+            query_cache_ttl_seconds: 300,
         }
     }
 }
@@ -704,6 +712,9 @@ impl From<&crate::settings::FindexSettings> for SearchOptions {
             graph_hops: settings.retrieval.graph_hops,
             candidate_limit: settings.retrieval.candidate_limit,
             mmr_lambda: settings.retrieval.mmr_lambda,
+            predictive_query_cache: settings.retrieval.predictive_query_cache,
+            query_cache_entries: settings.retrieval.query_cache_entries,
+            query_cache_ttl_seconds: settings.retrieval.query_cache_ttl_seconds,
         }
     }
 }
@@ -769,6 +780,44 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
     let limit = limit.max(1);
     let reranker = reranker.filter(|_| options.reranking);
     let effective_mode = effective_search_mode(mode, options)?;
+    let intent = crate::search::query_intent::analyze_query(query);
+    let revision = storage
+        .get_metadata::<crate::merkle::MerkleSnapshot>("merkle:v1")?
+        .map(|snapshot| snapshot.root_hash_hex());
+    let cache_prefix = revision.as_ref().map(|revision| {
+        format!(
+            "{}|{}|{}|{}|{}|{}|{:.3}|{}|{}",
+            db_path.to_string_lossy(),
+            revision,
+            effective_mode,
+            limit,
+            options.graph_hops,
+            options.candidate_limit,
+            options.mmr_lambda,
+            embedder.fingerprint(),
+            usize::from(reranker.is_some())
+        )
+    });
+    let exact_cache_key = cache_prefix
+        .as_ref()
+        .map(|prefix| format!("{prefix}|exact:{}", intent.raw.to_ascii_lowercase()));
+    let canonical_cache_key = cache_prefix
+        .as_ref()
+        .map(|prefix| format!("{prefix}|intent:{}", intent.canonical));
+    if options.predictive_query_cache {
+        let ttl = std::time::Duration::from_secs(options.query_cache_ttl_seconds);
+        if let Some(results) = exact_cache_key
+            .as_deref()
+            .and_then(|key| crate::search::query_cache::get(key, ttl))
+            .or_else(|| {
+                canonical_cache_key
+                    .as_deref()
+                    .and_then(|key| crate::search::query_cache::get(key, ttl))
+            })
+        {
+            return Ok(results);
+        }
+    }
 
     // Reranking and MMR need a bounded pool, but never force a hard-coded 50+50
     // inference workload when the configured pool is smaller.
@@ -779,10 +828,31 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
     }
     .clamp(1, 200);
 
+    let lexical_rankings = || -> Result<(Vec<String>, Vec<String>), IngestionError> {
+        let lexical_index = ensure_lexical_index(db_path, storage)?;
+        let expanded_query = if intent.lexical_query.is_empty() {
+            intent.raw.as_str()
+        } else {
+            intent.lexical_query.as_str()
+        };
+        let expanded = lexical_index.search(expanded_query, stage1_limit)?;
+        let raw = if intent.raw == expanded_query {
+            expanded.clone()
+        } else {
+            lexical_index
+                .search(&intent.raw, stage1_limit)
+                .unwrap_or_else(|_| expanded.clone())
+        };
+        Ok((
+            raw.into_iter().map(|(id, _)| id).collect(),
+            expanded.into_iter().map(|(id, _)| id).collect(),
+        ))
+    };
+
     let ranked_ids = match effective_mode {
         "lexical" => {
-            let lexical_index = ensure_lexical_index(db_path, storage)?;
-            lexical_index.search(query, stage1_limit)?
+            let (raw, expanded) = lexical_rankings()?;
+            rrf_merge_rankings(&[&raw, &expanded], stage1_limit)
         }
         "semantic" => {
             let vector_index = ensure_vector_index(db_path, storage, embedder)?;
@@ -791,23 +861,15 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
         _ => {
             // The two independent retrieval legs run concurrently. This keeps
             // semantic inference from serializing the Tantivy lookup.
-            let (lex_results, vec_results) = rayon::join(
-                || -> Result<_, IngestionError> {
-                    let lexical_index = ensure_lexical_index(db_path, storage)?;
-                    Ok(lexical_index.search(query, stage1_limit)?)
-                },
-                || -> Result<_, IngestionError> {
+            let (lex_results, vec_results) =
+                rayon::join(lexical_rankings, || -> Result<_, IngestionError> {
                     let vector_index = ensure_vector_index(db_path, storage, embedder)?;
                     Ok(vector_index.search(query, stage1_limit, embedder)?)
-                },
-            );
-            let lex_results = lex_results?;
+                });
+            let (raw_lex_ids, expanded_lex_ids) = lex_results?;
             let vec_results = vec_results?;
-
-            let lex_ids: Vec<String> = lex_results.into_iter().map(|(id, _)| id).collect();
             let vec_ids: Vec<String> = vec_results.into_iter().map(|(id, _)| id).collect();
-
-            rrf_merge(&lex_ids, &vec_ids, stage1_limit)
+            rrf_merge_rankings(&[&raw_lex_ids, &expanded_lex_ids, &vec_ids], stage1_limit)
         }
     };
 
@@ -865,7 +927,12 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
                 options.candidate_limit,
                 storage,
             )? {
-                let discounted = *score * related.score;
+                let relation_weight = if intent.relation == Some(related.relation) {
+                    1.18
+                } else {
+                    1.0
+                };
+                let discounted = *score * related.score * relation_weight;
                 expanded_by_id
                     .entry(related.symbol.id.clone())
                     .and_modify(|existing| existing.1 = existing.1.max(discounted))
@@ -875,12 +942,22 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
     }
 
     let mut expanded: Vec<(Symbol, f32)> = expanded_by_id.into_values().collect();
+    for (symbol, score) in &mut expanded {
+        let evidence =
+            crate::search::query_intent::relation_evidence_boost(storage, symbol, &intent)?;
+        *score *= 1.0 + evidence;
+    }
     expanded.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(mmr_diversify(
-        &expanded,
-        limit,
-        options.mmr_lambda.clamp(0.0, 1.0),
-    ))
+    let diversified = mmr_diversify(&expanded, limit, options.mmr_lambda.clamp(0.0, 1.0));
+    if options.predictive_query_cache {
+        if let Some(key) = exact_cache_key {
+            crate::search::query_cache::insert(key, &diversified, options.query_cache_entries);
+        }
+        if let Some(key) = canonical_cache_key {
+            crate::search::query_cache::insert(key, &diversified, options.query_cache_entries);
+        }
+    }
+    Ok(diversified)
 }
 
 fn rerank_candidate_limit() -> usize {
@@ -1082,6 +1159,39 @@ mod tests {
         let skeleton = get_codebase_skeleton(&storage, 1000).unwrap();
         assert!(skeleton.contains("struct Config"));
         assert!(skeleton.contains("fn run_server"));
+    }
+
+    #[test]
+    fn behavioral_query_ranks_relationship_source() {
+        let codebase_dir = tempdir().unwrap();
+        let db_dir = tempdir().unwrap();
+        write(
+            codebase_dir.path().join("auth.rs"),
+            b"pub struct AuthenticationService;\nimpl AuthenticationService {\n  pub fn login(&self) { request_api(); }\n}\n",
+        )
+        .unwrap();
+        write(
+            codebase_dir.path().join("api.rs"),
+            b"pub fn request_api() { println!(\"GET /session\"); }\n",
+        )
+        .unwrap();
+        let storage = Storage::open(db_dir.path().join("db")).unwrap();
+        ingest_codebase(codebase_dir.path(), db_dir.path(), &storage).unwrap();
+
+        let results = search_codebase(
+            db_dir.path(),
+            &storage,
+            "code where authentication service calls api",
+            "lexical",
+            None,
+            8,
+        )
+        .unwrap();
+
+        assert!(!results.is_empty());
+        assert!(results.iter().take(3).any(|(symbol, _)| {
+            symbol.name == "login" || symbol.name == "AuthenticationService"
+        }));
     }
 
     #[cfg(feature = "stack-graphs")]

@@ -119,6 +119,9 @@ pub struct RetrievalSettings {
     pub candidate_limit: usize,
     pub default_token_budget: usize,
     pub mmr_lambda: f32,
+    pub predictive_query_cache: bool,
+    pub query_cache_entries: usize,
+    pub query_cache_ttl_seconds: u64,
 }
 
 impl Default for RetrievalSettings {
@@ -132,6 +135,9 @@ impl Default for RetrievalSettings {
             candidate_limit: 32,
             default_token_budget: 2_048,
             mmr_lambda: 0.75,
+            predictive_query_cache: true,
+            query_cache_entries: 128,
+            query_cache_ttl_seconds: 300,
         }
     }
 }
@@ -165,6 +171,12 @@ pub struct UiSettings {
     pub motion: bool,
     pub graph_particles: bool,
     pub graph_labels: bool,
+    /// Keep the desktop process available from the system tray when its window closes.
+    pub minimize_to_tray: bool,
+    /// Render the small pointer companion in graphical and terminal clients.
+    pub cursor_companion: bool,
+    /// Enable terminal mouse capture. Touch-capable terminals normally translate touch to mouse.
+    pub terminal_pointer_input: bool,
 }
 
 impl Default for UiSettings {
@@ -174,6 +186,9 @@ impl Default for UiSettings {
             motion: true,
             graph_particles: true,
             graph_labels: true,
+            minimize_to_tray: true,
+            cursor_companion: true,
+            terminal_pointer_input: true,
         }
     }
 }
@@ -213,6 +228,9 @@ impl FindexSettings {
             ));
         }
         self.retrieval.mmr_lambda = self.retrieval.mmr_lambda.clamp(0.0, 1.0);
+        self.retrieval.query_cache_entries = self.retrieval.query_cache_entries.clamp(1, 2_048);
+        self.retrieval.query_cache_ttl_seconds =
+            self.retrieval.query_cache_ttl_seconds.clamp(5, 86_400);
         self.runtime.memory_budget_mib = self.runtime.memory_budget_mib.clamp(256, 1_048_576);
         self.runtime.gpu_memory_limit_mib = self.runtime.gpu_memory_limit_mib.clamp(256, 1_048_576);
         self.runtime.model_idle_seconds = self.runtime.model_idle_seconds.clamp(30, 86_400);

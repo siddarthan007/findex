@@ -20,9 +20,15 @@ use findex_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tauri::{AppHandle, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 use tower_http::cors::CorsLayer;
 
@@ -35,10 +41,14 @@ struct AppState {
     settings: Arc<RwLock<FindexSettings>>,
     api_url: String,
     api_token: String,
+    quitting: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
 struct PendingDesktopUpdate(Mutex<Option<Update>>);
+
+#[derive(Default)]
+struct PendingDeepLink(Mutex<Option<DeepLinkPayload>>);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +65,13 @@ struct DesktopUpdateInfo {
 struct ApiConfig {
     base_url: String,
     token: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeepLinkPayload {
+    url: String,
+    route: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +101,97 @@ fn default_limit() -> usize {
     25
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn dispatch_deep_link(app: &AppHandle, url: &tauri::Url) -> Result<(), String> {
+    if url.scheme() != "findex" || url.as_str().len() > 8_192 {
+        return Err("unsupported or oversized Findex deep link".to_string());
+    }
+    let route = url
+        .host_str()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        route.as_str(),
+        "search" | "open" | "symbol" | "graph" | "settings"
+    ) {
+        return Err("unsupported Findex deep-link route".to_string());
+    }
+    let payload = DeepLinkPayload {
+        url: url.to_string(),
+        route,
+    };
+    if let Some(pending) = app.try_state::<PendingDeepLink>() {
+        *pending.0.lock().map_err(|error| error.to_string())? = Some(payload.clone());
+    }
+    show_main_window(app);
+    app.emit("findex-deep-link", payload)
+        .map_err(|error| error.to_string())
+}
+
+fn setup_deep_links(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // Installed bundles register the static scheme. Runtime registration also supports
+    // portable Windows/Linux builds and development without weakening URL validation.
+    #[cfg(any(windows, target_os = "linux"))]
+    app.deep_link().register_all()?;
+
+    let app_handle = app.handle().clone();
+    app.deep_link().on_open_url(move |event| {
+        for url in event.urls() {
+            if let Err(error) = dispatch_deep_link(&app_handle, &url) {
+                eprintln!("ignored invalid Findex deep link: {error}");
+            }
+        }
+    });
+
+    if let Some(urls) = app.deep_link().get_current()? {
+        for url in urls {
+            if let Err(error) = dispatch_deep_link(app.handle(), &url) {
+                eprintln!("ignored invalid startup deep link: {error}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let show = MenuItem::with_id(app, "show", "Show Findex", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &settings, &quit])?;
+    let mut tray = TrayIconBuilder::new()
+        .tooltip("Findex code intelligence")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "settings" => {
+                if let Ok(url) = tauri::Url::parse("findex://settings") {
+                    let _ = dispatch_deep_link(app, &url);
+                }
+            }
+            "quit" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.quitting.store(true, Ordering::Release);
+                }
+                app.exit(0);
+            }
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct SearchResult {
     score: f32,
@@ -103,6 +211,22 @@ struct PathRequest {
 #[derive(Debug, Deserialize)]
 struct SymbolRequest {
     symbol_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourceRequest {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SourcePreview {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    text: String,
+    truncated: bool,
 }
 
 fn stats(state: &AppState) -> Result<StatsView, String> {
@@ -171,6 +295,17 @@ fn get_api_config(state: State<'_, AppState>) -> ApiConfig {
         base_url: state.api_url.clone(),
         token: state.api_token.clone(),
     }
+}
+
+#[tauri::command]
+fn take_pending_deep_link(
+    pending: State<'_, PendingDeepLink>,
+) -> Result<Option<DeepLinkPayload>, String> {
+    pending
+        .0
+        .lock()
+        .map_err(|error| error.to_string())
+        .map(|mut value| value.take())
 }
 
 #[tauri::command]
@@ -264,6 +399,34 @@ fn persist_settings(state: &AppState, settings: FindexSettings) -> Result<Findex
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<FindexSettings, String> {
     read_settings(&state)
+}
+
+#[tauri::command]
+fn list_models() -> Vec<findex_core::models::ModelStatus> {
+    findex_core::models::model_catalog_status()
+}
+
+#[tauri::command]
+async fn download_model_profile(
+    profile: String,
+) -> Result<Vec<findex_core::models::ResolvedModel>, String> {
+    let profile = profile
+        .parse::<findex_core::models::ModelProfile>()
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        [
+            findex_core::models::ModelKind::Embedding,
+            findex_core::models::ModelKind::Reranker,
+        ]
+        .into_iter()
+        .map(|kind| {
+            findex_core::models::ensure_model_for_profile(kind, profile, false)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -386,6 +549,56 @@ async fn api_impact(
     })
 }
 
+fn source_preview(state: &AppState, request: SourceRequest) -> Result<SourcePreview, String> {
+    let normalize = |value: &str| {
+        let value = value.replace('\\', "/");
+        if cfg!(windows) {
+            value.to_ascii_lowercase()
+        } else {
+            value
+        }
+    };
+    let indexed = state
+        .storage
+        .list_files()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|file| normalize(&file.path.to_string_lossy()) == normalize(&request.path))
+        .ok_or_else(|| "source preview is restricted to exact indexed paths".to_string())?;
+    let start = request.start_line.max(1);
+    let requested_end = request.end_line.max(start);
+    let end = requested_end.min(start.saturating_add(399));
+    let reader = BufReader::new(fs::File::open(&indexed.path).map_err(|error| error.to_string())?);
+    let mut text = String::new();
+    let mut actual_end = start.saturating_sub(1);
+    for (index, line) in reader.lines().enumerate() {
+        let line_number = index + 1;
+        if line_number > end {
+            break;
+        }
+        if line_number >= start {
+            text.push_str(&line.map_err(|error| error.to_string())?);
+            text.push('\n');
+            actual_end = line_number;
+        }
+    }
+    Ok(SourcePreview {
+        path: indexed.path.to_string_lossy().to_string(),
+        start_line: start,
+        end_line: actual_end,
+        text,
+        truncated: requested_end > end,
+    })
+}
+
+async fn api_source(
+    AxumState(state): AxumState<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SourceRequest>,
+) -> Response {
+    authorized_json(&state, &headers, || source_preview(&state, request))
+}
+
 async fn api_settings(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Response {
     authorized_json(&state, &headers, || read_settings(&state))
 }
@@ -436,6 +649,7 @@ async fn serve_api(state: Arc<AppState>, listener: std::net::TcpListener) -> Res
         .route("/api/query", post(api_query))
         .route("/api/ast", post(api_ast))
         .route("/api/impact", post(api_impact))
+        .route("/api/source", post(api_source))
         .route("/api/settings", get(api_settings).post(api_update_settings))
         .layer(cors)
         .with_state(state);
@@ -448,41 +662,11 @@ async fn serve_api(state: Arc<AppState>, listener: std::net::TcpListener) -> Res
 
 fn main() {
     findex_core::runtime::configure_runtime();
-    let db_path = std::env::var("FINDEX_DB_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".findex_db"));
+    let db_override = std::env::var("FINDEX_DB_PATH").ok().map(PathBuf::from);
     let requested_port = std::env::var("FINDEX_DASHBOARD_PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(37_421);
-    let listener = std::net::TcpListener::bind(("127.0.0.1", requested_port)).or_else(|error| {
-        eprintln!(
-            "Findex dashboard port {requested_port} is unavailable ({error}); using an ephemeral loopback port"
-        );
-        std::net::TcpListener::bind(("127.0.0.1", 0))
-    })
-    .expect("failed to bind the loopback dashboard API");
-    listener
-        .set_nonblocking(true)
-        .expect("failed to configure the loopback dashboard listener");
-    let bind = listener
-        .local_addr()
-        .expect("failed to read dashboard listener address");
-    let settings = findex_core::settings::load_or_default(&db_path);
-    findex_core::runtime::apply_runtime_settings(&settings);
-    let reranker = create_reranker();
-    let embedder = create_embedder(128);
-    findex_core::runtime::start_model_idle_janitor(&embedder, &reranker);
-    let state = AppState {
-        db_path: db_path.clone(),
-        storage: Arc::new(Storage::open(&db_path).expect("failed to open findex database")),
-        reranker,
-        embedder,
-        settings: Arc::new(RwLock::new(settings)),
-        api_url: format!("http://{bind}"),
-        api_token: uuid::Uuid::new_v4().to_string(),
-    };
-    let server_state = Arc::new(state.clone());
     let updater_plugin = findex_core::updater::updater_public_key()
         .map(|public_key| {
             tauri_plugin_updater::Builder::new()
@@ -491,10 +675,49 @@ fn main() {
         })
         .unwrap_or_else(|| tauri_plugin_updater::Builder::new().build());
     tauri::Builder::default()
+        // This must be the first plugin so Windows/Linux deep-link launches are
+        // forwarded to the existing process instead of creating a second index owner.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(updater_plugin)
-        .manage(state)
+        .plugin(tauri_plugin_deep_link::init())
         .manage(PendingDesktopUpdate::default())
-        .setup(move |_app| {
+        .manage(PendingDeepLink::default())
+        .setup(move |app| {
+            let db_path = match db_override.clone() {
+                Some(path) => path,
+                None => app.path().app_local_data_dir()?.join("index"),
+            };
+            fs::create_dir_all(&db_path)?;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", requested_port))
+                .or_else(|error| {
+                    eprintln!(
+                        "Findex dashboard port {requested_port} is unavailable ({error}); using an ephemeral loopback port"
+                    );
+                    std::net::TcpListener::bind(("127.0.0.1", 0))
+                })?;
+            listener.set_nonblocking(true)?;
+            let bind = listener.local_addr()?;
+            let settings = findex_core::settings::load_or_default(&db_path);
+            findex_core::runtime::apply_runtime_settings(&settings);
+            let reranker = create_reranker();
+            let embedder = create_embedder(128);
+            findex_core::runtime::start_model_idle_janitor(&embedder, &reranker);
+            let state = AppState {
+                db_path: db_path.clone(),
+                storage: Arc::new(Storage::open(&db_path)?),
+                reranker,
+                embedder,
+                settings: Arc::new(RwLock::new(settings)),
+                api_url: format!("http://{bind}"),
+                api_token: uuid::Uuid::new_v4().to_string(),
+                quitting: Arc::new(AtomicBool::new(false)),
+            };
+            let server_state = Arc::new(state.clone());
+            app.manage(state);
+            setup_deep_links(app)?;
+            setup_tray(app)?;
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = serve_api(server_state, listener).await {
                     eprintln!("Findex dashboard API stopped: {error}");
@@ -502,8 +725,25 @@ fn main() {
             });
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let Some(state) = window.app_handle().try_state::<AppState>() else {
+                    return;
+                };
+                let minimize = state
+                    .settings
+                    .read()
+                    .map(|settings| settings.ui.minimize_to_tray)
+                    .unwrap_or(false);
+                if minimize && !state.quitting.load(Ordering::Acquire) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_api_config,
+            take_pending_deep_link,
             get_graph_data,
             get_architecture,
             search_symbols,
@@ -514,6 +754,8 @@ fn main() {
             reindex,
             get_settings,
             set_settings,
+            list_models,
+            download_model_profile,
             check_for_update,
             install_update
         ])

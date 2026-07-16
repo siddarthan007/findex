@@ -1,4 +1,7 @@
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -209,6 +212,13 @@ pub struct App {
     last_profile: Instant,
     reranker: Arc<dyn Reranker>,
     embedder: Arc<dyn Embedder>,
+    pointer_input: bool,
+    cursor_companion: bool,
+    pointer: Option<(u16, u16)>,
+    frame_area: Rect,
+    search_results_area: Option<Rect>,
+    graph_area: Option<Rect>,
+    graph_hitboxes: Vec<(u16, u16, usize)>,
 }
 
 impl App {
@@ -300,6 +310,13 @@ impl App {
             last_profile: Instant::now(),
             reranker,
             embedder,
+            pointer_input: settings.ui.terminal_pointer_input,
+            cursor_companion: settings.ui.cursor_companion,
+            pointer: None,
+            frame_area: Rect::default(),
+            search_results_area: None,
+            graph_area: None,
+            graph_hitboxes: Vec::new(),
         })
     }
 
@@ -307,11 +324,17 @@ impl App {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
+        if self.pointer_input {
+            stdout.execute(EnableMouseCapture)?;
+        }
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         self.logo = load_terminal_logo();
         terminal.clear()?;
         let result = self.main_loop(&mut terminal);
         disable_raw_mode()?;
+        if self.pointer_input {
+            terminal.backend_mut().execute(DisableMouseCapture)?;
+        }
         terminal.backend_mut().execute(LeaveAlternateScreen)?;
         terminal.show_cursor()?;
         result
@@ -326,10 +349,16 @@ impl App {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
             if event::poll(Duration::from_millis(80))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Press && self.handle_key(key, &storage)? {
-                        return Ok(());
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        if self.handle_key(key, &storage)? {
+                            return Ok(());
+                        }
                     }
+                    Event::Mouse(mouse) if self.pointer_input => {
+                        self.handle_mouse(mouse, &storage)?
+                    }
+                    _ => {}
                 }
             }
             let elapsed = last_frame.elapsed();
@@ -536,6 +565,59 @@ impl App {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, storage: &Storage) -> anyhow::Result<()> {
+        self.pointer = Some((mouse.column, mouse.row));
+        match mouse.kind {
+            MouseEventKind::ScrollUp => match self.view {
+                View::Search => self.move_search(-1),
+                View::Graph => self.graph_zoom = (self.graph_zoom * 1.12).min(4.0),
+                View::Query => self.query_scroll.scroll_up(),
+                _ => {}
+            },
+            MouseEventKind::ScrollDown => match self.view {
+                View::Search => self.move_search(1),
+                View::Graph => self.graph_zoom = (self.graph_zoom / 1.12).max(0.4),
+                View::Query => self.query_scroll.scroll_down(),
+                _ => {}
+            },
+            MouseEventKind::Down(MouseButton::Left) => {
+                if (1..4).contains(&mouse.row) && self.frame_area.width > 0 {
+                    let index = (usize::from(mouse.column) * View::ALL.len()
+                        / usize::from(self.frame_area.width.max(1)))
+                    .min(View::ALL.len() - 1);
+                    self.change_view(View::ALL[index]);
+                    return Ok(());
+                }
+                if self.view == View::Search
+                    && self
+                        .search_results_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
+                {
+                    if let Some(area) = self.search_results_area {
+                        let index = usize::from(mouse.row.saturating_sub(area.y + 1));
+                        if index < self.search_results.len() {
+                            self.search_state.select(Some(index));
+                            self.refresh_source_preview();
+                        }
+                    }
+                } else if self.view == View::Graph {
+                    if let Some((_, _, index)) = self
+                        .graph_hitboxes
+                        .iter()
+                        .min_by_key(|(x, y, _)| x.abs_diff(mouse.column) + y.abs_diff(mouse.row))
+                    {
+                        self.graph_selected = *index;
+                        if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                            self.inspect_graph_selected(storage)?;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn change_view(&mut self, view: View) {
@@ -839,6 +921,7 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        self.frame_area = frame.area();
         frame.render_widget(
             Block::default().style(Style::default().bg(nord::bg())),
             frame.area(),
@@ -878,6 +961,17 @@ impl App {
         }
         self.toasts.set_area(frame.area());
         frame.render_widget(&self.toasts, frame.area());
+        if self.cursor_companion && self.motion {
+            if let Some((column, row)) = self.pointer {
+                let x = column.saturating_add(1);
+                if x + 1 < frame.area().right() && row < frame.area().bottom() {
+                    frame.render_widget(
+                        Paragraph::new(":>").style(Style::default().fg(nord::cyan())),
+                        Rect::new(x, row, 2, 1),
+                    );
+                }
+            }
+        }
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
@@ -1072,6 +1166,7 @@ impl App {
         frame.render_widget(&self.search_input, rows[0]);
         let columns = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
             .split(rows[1]);
+        self.search_results_area = Some(columns[0]);
         let items: Vec<_> = self
             .search_results
             .iter()
@@ -1117,7 +1212,8 @@ impl App {
         );
     }
 
-    fn draw_graph(&self, frame: &mut Frame, area: Rect) {
+    fn draw_graph(&mut self, frame: &mut Frame, area: Rect) {
+        self.graph_area = Some(area);
         let graph = &self.graph;
         let selected = graph.nodes.get(self.graph_selected);
         let selected_id = selected.map(|node| node.id.as_str());
@@ -1167,6 +1263,27 @@ impl App {
             })
             .collect();
         let half_span = 1.1 / self.graph_zoom;
+        let inner_width = area.width.saturating_sub(2).max(1) as f64;
+        let inner_height = area.height.saturating_sub(2).max(1) as f64;
+        let graph_hitboxes: Vec<_> = visible_nodes
+            .iter()
+            .filter_map(|node| {
+                let index = graph
+                    .nodes
+                    .iter()
+                    .position(|candidate| candidate.id == node.id)?;
+                let (x, y) = *positions.get(node.id.as_str())?;
+                let screen_x = area.x
+                    + 1
+                    + (((x - (self.graph_pan.0 - half_span)) / (half_span * 2.0)) * inner_width)
+                        .clamp(0.0, inner_width) as u16;
+                let screen_y = area.y
+                    + 1
+                    + (((self.graph_pan.1 + half_span - y) / (half_span * 2.0)) * inner_height)
+                        .clamp(0.0, inner_height) as u16;
+                Some((screen_x, screen_y, index))
+            })
+            .collect();
         let edge_label = self
             .graph_edge_filter
             .map(|kind| format!("{kind:?}"))
@@ -1239,6 +1356,7 @@ impl App {
                 }
             });
         frame.render_widget(canvas, area);
+        self.graph_hitboxes = graph_hitboxes;
         if let Some(node) = selected {
             let width = area.width.clamp(24, 52);
             let info_area = Rect::new(
@@ -1741,5 +1859,38 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("FINDEX"));
+    }
+
+    #[test]
+    fn pointer_companion_and_click_navigation_are_rendered() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("db");
+        let mut app = App::new(db_path.clone()).unwrap();
+        app.motion = true;
+        app.cursor_companion = true;
+        app.pointer = Some((10, 10));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains(":>"));
+
+        let storage = Storage::open(db_path).unwrap();
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 50,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            &storage,
+        )
+        .unwrap();
+        assert_eq!(app.view, View::Graph);
     }
 }

@@ -40,6 +40,16 @@ The hot path is pure Rust. Rayon bounds CPU parallelism, memmap2 avoids copies d
 
 ## Quick start
 
+Install the latest unified desktop + CLI + TUI release with SHA-256 verification:
+
+```powershell
+irm https://raw.githubusercontent.com/siddarthan007/findex/main/install.ps1 | iex
+```
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/siddarthan007/findex/main/install.sh | sh
+```
+
 ```powershell
 cargo test --workspace
 cargo run -p findex-cli -- models
@@ -64,6 +74,8 @@ findex ast crates/findex-core/src/lib.rs --format json
 findex graph-export --limit 1000 > graph.json
 findex mcp
 findex mcp-http --bind 127.0.0.1:37420
+findex setup-agent all --dry-run
+findex setup-agent codex
 ```
 
 For HTTP, set `FINDEX_MCP_TOKEN` before binding beyond loopback. The current server is stateless JSON Streamable HTTP: POST is implemented, while GET/SSE resumability and MCP session IDs are intentionally not advertised.
@@ -83,6 +95,8 @@ For HTTP, set `FINDEX_MCP_TOKEN` before binding beyond loopback. The current ser
 | `vfs_update`, `micro_compile` | Bounded unsaved-file shadowing and isolated parse/relationship validation without touching disk or the persisted index. |
 | `pin_execution_trace` | Attach validated runtime paths to graph adjacency while preserving multiple trace identities. |
 | `search_code` | Hybrid/lexical/semantic search with exact paths and line ranges. |
+| `fetch_context`, `fetch_file`, `find_files` | Bounded drop-in context and source fetch tools with structured/compact/text response modes. |
+| `list_models` | Local-only cache status for every pinned embedding and reranker profile. |
 | `repo_map` | Personalized PageRank signature skeleton under a token budget. |
 | `expand_context` | Bounded structural neighborhood around an exact symbol. |
 | `semantic_diff`, `taint_trace`, `predict_context` | Structural change, review leads, and graph-local context prediction. |
@@ -116,6 +130,8 @@ cargo run -p findex-tauri
 The unsigned command is a local Windows packaging smoke test. Release CI builds signed updater artifacts from `tauri.updater.conf.json`. Each platform bundle includes the release CLI/TUI sidecar. The frontend production build code-splits Three.js: the normal UI bundle loads first and the 3D graph chunk is fetched only for the graph surface. The local Axum data API first tries `127.0.0.1:37421`, falls back to an ephemeral loopback port if occupied, and uses a random per-process token delivered to the WebView through a Tauri command.
 
 Packaged desktop releases check the signed GitHub `latest.json` after startup without blocking the UI. A compact banner opens a release-details dialog; download and installation begin only after the user selects **Install update**. CLI/TUI releases use the same public trust root with `latest-cli.json`; use `findex update check`, `findex update install`, or F8 in the TUI. Local developer builds have no compiled public key and remain network-silent.
+
+Installed desktop bundles register validated dynamic routes: `findex://search?q=...&mode=hybrid`, `findex://symbol?id=...`, `findex://open?path=...`, `findex://graph`, and `findex://settings`. Windows/Linux portable builds also register at runtime; macOS schemes are bundle-declared. Unknown routes and oversized URLs are rejected, and a deep link is forwarded to the existing single instance.
 
 ## Model profiles
 

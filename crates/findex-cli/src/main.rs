@@ -15,8 +15,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+mod agent_setup;
 mod ingest_sprite;
 mod tui;
+use agent_setup::AgentTarget;
 use findex_core::resolver::{
     expand_context, get_callees, get_callers, resolve_definition, resolve_references,
 };
@@ -214,6 +216,18 @@ enum Commands {
         #[arg(short = 'D', long, default_value = "3")]
         depth: u32,
     },
+    /// Install Findex MCP and its token-saving skill for a coding agent
+    SetupAgent {
+        /// Agent configuration to install, or all supported agents
+        #[arg(value_enum, default_value = "all")]
+        agent: AgentTarget,
+        /// Replace only an existing Findex entry or skill; unrelated config is preserved
+        #[arg(long)]
+        force: bool,
+        /// Print intended paths and commands without changing anything
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -282,6 +296,18 @@ enum SettingsCommand {
         graph_particles: Option<bool>,
         #[arg(long)]
         graph_labels: Option<bool>,
+        #[arg(long)]
+        predictive_query_cache: Option<bool>,
+        #[arg(long)]
+        query_cache_entries: Option<usize>,
+        #[arg(long)]
+        query_cache_ttl_seconds: Option<u64>,
+        #[arg(long)]
+        minimize_to_tray: Option<bool>,
+        #[arg(long)]
+        cursor_companion: Option<bool>,
+        #[arg(long)]
+        terminal_pointer_input: Option<bool>,
     },
     /// Restore production defaults
     Reset,
@@ -986,6 +1012,12 @@ async fn main() -> anyhow::Result<()> {
                     motion,
                     graph_particles,
                     graph_labels,
+                    predictive_query_cache,
+                    query_cache_entries,
+                    query_cache_ttl_seconds,
+                    minimize_to_tray,
+                    cursor_companion,
+                    terminal_pointer_input,
                 } => {
                     let mut settings = findex_core::settings::load(&cli.db_path)?;
                     if let Some(value) = lexical {
@@ -1055,6 +1087,24 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(value) = graph_labels {
                         settings.ui.graph_labels = *value;
                     }
+                    if let Some(value) = predictive_query_cache {
+                        settings.retrieval.predictive_query_cache = *value;
+                    }
+                    if let Some(value) = query_cache_entries {
+                        settings.retrieval.query_cache_entries = *value;
+                    }
+                    if let Some(value) = query_cache_ttl_seconds {
+                        settings.retrieval.query_cache_ttl_seconds = *value;
+                    }
+                    if let Some(value) = minimize_to_tray {
+                        settings.ui.minimize_to_tray = *value;
+                    }
+                    if let Some(value) = cursor_companion {
+                        settings.ui.cursor_companion = *value;
+                    }
+                    if let Some(value) = terminal_pointer_input {
+                        settings.ui.terminal_pointer_input = *value;
+                    }
                     findex_core::settings::save(&cli.db_path, settings)?
                 }
             };
@@ -1112,6 +1162,31 @@ async fn main() -> anyhow::Result<()> {
                 );
                 for id in result.tainted_symbols.keys() {
                     println!("  {}", id);
+                }
+            }
+        }
+        Commands::SetupAgent {
+            agent,
+            force,
+            dry_run,
+        } => {
+            let reports = agent_setup::setup(*agent, *force, *dry_run)?;
+            match format {
+                OutputFormat::Json => print_json(serde_json::to_value(reports)?)?,
+                OutputFormat::Compact => {
+                    for report in reports {
+                        println!(
+                            "{}\tchanged={}\tmcp={}\tskill={}",
+                            report.agent, report.changed, report.mcp, report.skill
+                        );
+                    }
+                }
+                OutputFormat::Text => {
+                    for report in reports {
+                        println!("{}", report.agent);
+                        println!("  MCP: {}", report.mcp);
+                        println!("  skill: {}", report.skill);
+                    }
                 }
             }
         }

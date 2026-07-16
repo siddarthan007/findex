@@ -52,7 +52,14 @@ export const mockRuntime: RuntimeProfile = {
 export const mockSettings: FindexSettings = {
   version: 1,
   indexing: { lexical_index: true, semantic_index: true, stack_graphs: true, watcher: true, vfs_shadowing: true, execution_trace_pinning: true },
-  retrieval: { semantic_search: true, reranking: true, graph_expansion: true, structural_prefetch: true, graph_hops: 1, candidate_limit: 32, default_token_budget: 2048, mmr_lambda: .75 },
+  retrieval: {
+    semantic_search: true, reranking: true, graph_expansion: true, structural_prefetch: true,
+    graph_hops: 1, candidate_limit: 32, default_token_budget: 2048, mmr_lambda: .75,
+    predictive_query_cache: true, query_cache_entries: 128, query_cache_ttl_seconds: 300
+  },
   runtime: { compute_device: 'auto', model_profile: 'fast', memory_budget_mib: 2048, gpu_memory_limit_mib: 4096, model_idle_seconds: 300 },
-  ui: { theme: 'system', motion: true, graph_particles: true, graph_labels: true }
+  ui: {
+    theme: 'system', motion: true, graph_particles: true, graph_labels: true,
+    minimize_to_tray: true, cursor_companion: true, terminal_pointer_input: true
+  }
 };

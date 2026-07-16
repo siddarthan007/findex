@@ -30,7 +30,7 @@ Do not call `list_files`, `repo_map`, architecture overview, and graph snapshot 
 
 | Intent | First call | Follow only if needed |
 |---|---|---|
-| Broad implementation or bug task | `get_context_bundle` | exact source ranges, then `impact_analysis` |
+| Broad implementation or bug task | `fetch_context` or `get_context_bundle` | exact source ranges, then `impact_analysis` |
 | Exact identifier or error token | `search_code` lexical | `get_definition`, callers/references |
 | Concept without known names | `search_code` hybrid | semantic only if dense index is ready |
 | Repository architecture | `get_architecture_overview` | focal `repo_map` or bounded graph snapshot |
@@ -84,6 +84,8 @@ This is a least-to-most workflow: establish anchors first, resolve relationships
 - If a requested retrieval leg is disabled, inspect `effective_mode`; Findex may use the enabled leg. It returns an error when both lexical and semantic retrieval are disabled.
 - Start `search_code` at 5-10 results. Reranking 100 weak candidates wastes compute and attention.
 - Start `get_context_bundle` at 2048 tokens. Use 1024 for localization and 4096 only for cross-layer planning.
+- Use `response_mode: structured` when the client reads `structuredContent`; use `compact` only when it does not. Never carry both channels into context.
+- Use `find_files` -> `fetch_file` or `fetch_context` as drop-in replacements for generic repository fetch tools. Exact indexed paths and hard budgets prevent accidental whole-file/repository context.
 - Use `regex:` only with a bounded literal pattern. Do not reproduce a repository-wide grep inside a regex.
 - Never infer identity from a display name when duplicate symbols exist; retain the returned symbol ID.
 

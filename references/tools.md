@@ -7,10 +7,10 @@ Use exact JSON property names. Limits and budgets are safety controls, not sugge
 `search_code`
 
 ```json
-{ "query": "request authentication", "mode": "hybrid", "limit": 10 }
+{ "query": "code where authentication service calls api", "mode": "hybrid", "limit": 10, "response_mode": "structured" }
 ```
 
-Returns structured JSON with requested/effective mode, executed stages, and ranked symbols with exact locations. Use lexical for identifiers/error text, hybrid for behavior, semantic for vocabulary mismatch. `regex:<pattern>` is lexical-only. If one retrieval leg is disabled, confirm the reported fallback rather than assuming the requested mode ran. Task mode is optional.
+Returns requested/effective mode, executed stages, ranked symbols with exact locations, and relationship-aware evidence. Natural-language relation phrases such as “calls”, “imports”, “inherits”, “contains”, and “defines” are parsed into typed graph intent; preserve the reasons and exact IDs when evaluating a result. Use lexical for identifiers/error text, hybrid for behavior, semantic for vocabulary mismatch. `regex:<pattern>` is lexical-only. If one retrieval leg is disabled, confirm the reported fallback rather than assuming the requested mode ran. Task mode is optional.
 
 `get_context_bundle`
 
@@ -19,6 +19,40 @@ Returns structured JSON with requested/effective mode, executed stages, and rank
 ```
 
 Returns a repo map, ranked source ranges, selection reasons, tokens used, and candidate tokens avoided. This is the default broad-task call. Task mode is optional.
+
+`fetch_context`
+
+```json
+{ "query": "authentication service calls api", "mode": "hybrid", "token_budget": 2048, "response_mode": "structured" }
+```
+
+Drop-in alias for `get_context_bundle`. Prefer this name when replacing a generic code-fetching tool in an existing agent harness.
+
+`find_files`
+
+```json
+{ "query": "auth service", "limit": 20, "response_mode": "structured" }
+```
+
+Returns matching indexed paths without source bodies. Use the returned exact path with `fetch_file`.
+
+`fetch_file`
+
+```json
+{ "path": "src/auth/service.rs", "start_line": 40, "end_line": 120, "max_tokens": 1600, "response_mode": "structured" }
+```
+
+Reads only an exact path already present in the index. Lines and token caps are enforced, so it is safe as a bounded replacement for generic file-fetch tools. It never turns an arbitrary filesystem path into an unrestricted read.
+
+### Response modes
+
+Use `response_mode` on retrieval and drop-in tools:
+
+- `structured` (default): full JSON appears once in `structuredContent.data`; text contains only a short pointer. Use this for MCP clients that consume structured results.
+- `compact`: minified JSON appears in text; `structuredContent` contains metadata only. Use this for clients that ignore structured content.
+- `text`: readable text appears in content; `structuredContent` contains metadata only. Use this for human-facing MCP clients.
+
+Do not ask for structured mode and then copy both content channels into model context. They are intentionally non-duplicating.
 
 `repo_map`
 
@@ -221,6 +255,14 @@ Mutates all persistent indexes. Task mode is optional and preferred. Do not run 
 ```
 
 Returns CPU pools, RAM/process budgets, model policy, ONNX threads, CUDA build status, GPU arena cap, batching, quantization, and optional NVIDIA telemetry.
+
+`list_models`
+
+```json
+{ "response_mode": "structured" }
+```
+
+Returns every pinned fast/balanced/quality embedding and reranker profile with local-cache status. This tool is local-only and never initiates a download; use the human CLI or desktop Settings view to authorize acquisition.
 
 ## MCP resources and prompts
 

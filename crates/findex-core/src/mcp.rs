@@ -26,6 +26,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+fn response_mode(args: &Value) -> &str {
+    match args.get("response_mode").and_then(Value::as_str) {
+        Some("compact") => "compact",
+        Some("text") => "text",
+        _ => "structured",
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
     #[error("I/O error: {0}")]
@@ -520,7 +528,8 @@ impl McpServer {
                             "properties": {
                                 "query": { "type": "string" },
                                 "mode": { "type": "string", "enum": ["hybrid", "lexical", "semantic"], "default": "hybrid" },
-                                "limit": { "type": "integer", "default": 10 }
+                                "limit": { "type": "integer", "default": 10 },
+                                "response_mode": { "type": "string", "enum": ["structured", "compact", "text"], "default": "structured" }
                             },
                             "required": ["query"]
                         },
@@ -743,11 +752,58 @@ impl McpServer {
                             "properties": {
                                 "query": { "type": "string" },
                                 "mode": { "type": "string", "enum": ["hybrid", "lexical", "semantic"], "default": "hybrid" },
-                                "token_budget": { "type": "integer", "default": 2048, "minimum": 128, "maximum": 32768 }
+                                "token_budget": { "type": "integer", "default": 2048, "minimum": 128, "maximum": 32768 },
+                                "response_mode": { "type": "string", "enum": ["structured", "compact", "text"], "default": "structured", "description": "structured returns full data once plus a tiny text marker; compact/text return content without duplicating data" }
                             },
                             "required": ["query"]
                         },
                         "execution": { "taskSupport": "optional" },
+                        "outputSchema": { "type": "object" }
+                    },
+                    {
+                        "name": "fetch_context",
+                        "description": "Drop-in code-fetching tool: return a token-bounded repo map and exact source ranges for a natural-language task in one call. Alias of get_context_bundle.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string", "description": "Behavior or change to locate, e.g. authentication service calls API" },
+                                "mode": { "type": "string", "enum": ["hybrid", "lexical", "semantic"], "default": "hybrid" },
+                                "token_budget": { "type": "integer", "default": 2048, "minimum": 128, "maximum": 32768 },
+                                "response_mode": { "type": "string", "enum": ["structured", "compact", "text"], "default": "structured" }
+                            },
+                            "required": ["query"]
+                        },
+                        "execution": { "taskSupport": "optional" },
+                        "outputSchema": { "type": "object" }
+                    },
+                    {
+                        "name": "fetch_file",
+                        "description": "Read a bounded line range from an indexed file only. Safe drop-in replacement for unrestricted whole-file reads.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string", "description": "Exact path returned by search_code, fetch_context, list_files, or find_files" },
+                                "start_line": { "type": "integer", "default": 1, "minimum": 1 },
+                                "end_line": { "type": "integer", "description": "Inclusive; at most 2000 lines after start_line" },
+                                "token_budget": { "type": "integer", "default": 4096, "minimum": 64, "maximum": 32768 },
+                                "response_mode": { "type": "string", "enum": ["structured", "compact", "text"], "default": "structured" }
+                            },
+                            "required": ["path"]
+                        },
+                        "outputSchema": { "type": "object" }
+                    },
+                    {
+                        "name": "find_files",
+                        "description": "Find indexed file paths by case-insensitive path terms without reading file contents.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": { "type": "string" },
+                                "limit": { "type": "integer", "default": 50, "minimum": 1, "maximum": 500 },
+                                "response_mode": { "type": "string", "enum": ["structured", "compact", "text"], "default": "structured" }
+                            },
+                            "required": ["query"]
+                        },
                         "outputSchema": { "type": "object" }
                     },
                     {
@@ -795,6 +851,15 @@ impl McpServer {
                         "outputSchema": { "type": "object" }
                     },
                     {
+                        "name": "list_models",
+                        "description": "Return every pinned embedding/reranker profile and whether its immutable artifacts are present in the local shared cache. Never downloads.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": { "response_mode": { "type": "string", "enum": ["structured", "compact", "text"], "default": "structured" } }
+                        },
+                        "outputSchema": { "type": "object" }
+                    },
+                    {
                         "name": "get_settings",
                         "description": "Return the effective persisted indexing, retrieval, compute, memory, and UI controls. Read this before assuming semantic, graph, VFS, trace, or GPU stages are enabled.",
                         "inputSchema": { "type": "object", "properties": {} },
@@ -812,9 +877,11 @@ impl McpServer {
                                         "lexical", "semantic", "reranking", "graph_expansion", "structural_prefetch",
                                         "stack_graphs", "watcher", "vfs_shadowing", "trace_pinning",
                                         "graph_hops", "candidate_limit", "token_budget", "mmr_lambda",
+                                        "predictive_query_cache", "query_cache_entries", "query_cache_ttl_seconds",
                                         "compute_device", "model_profile", "memory_budget_mib",
                                         "gpu_memory_limit_mib", "model_idle_seconds", "theme", "motion",
-                                        "graph_particles", "graph_labels"
+                                        "graph_particles", "graph_labels", "minimize_to_tray", "cursor_companion",
+                                        "terminal_pointer_input"
                                     ]
                                 },
                                 "value": {}
@@ -868,7 +935,7 @@ impl McpServer {
             Ok(content) => json!({
                 "jsonrpc": "2.0",
                 "id": request.id,
-                "result": Self::tool_success_result(name, content, elapsed_ms)
+                "result": Self::tool_success_result(name, content, elapsed_ms, response_mode(&args))
             }),
             Err(McpError::UnknownTool(name)) => Self::error_response(
                 request.id.clone(),
@@ -905,34 +972,48 @@ impl McpServer {
             "list_files" => self.tool_list_files(),
             "get_stats" => self.tool_get_stats(),
             "get_context_bundle" => self.tool_get_context_bundle(args),
+            "fetch_context" => self.tool_get_context_bundle(args),
+            "fetch_file" => self.tool_fetch_file(args),
+            "find_files" => self.tool_find_files(args),
             "impact_analysis" => self.tool_impact_analysis(args),
             "get_ast_outline" => self.tool_get_ast_outline(args),
             "get_graph_snapshot" => self.tool_get_graph_snapshot(args),
             "get_architecture_overview" => self.tool_get_architecture_overview(),
             "get_runtime_profile" => self.tool_get_runtime_profile(args),
+            "list_models" => Ok(serde_json::to_string_pretty(
+                &crate::models::model_catalog_status(),
+            )?),
             "get_settings" => self.tool_get_settings(),
             "set_setting" => self.tool_set_setting(args),
             other => Err(McpError::UnknownTool(other.to_string())),
         }
     }
 
-    fn tool_success_result(name: &str, content: String, elapsed_ms: u128) -> Value {
+    fn tool_success_result(name: &str, content: String, elapsed_ms: u128, mode: &str) -> Value {
         let data = serde_json::from_str::<Value>(&content).unwrap_or_else(|_| {
             json!({
                 "text": content.clone()
             })
         });
-        json!({
-            "content": [{
-                "type": "text",
-                "text": format!("[findex:{} {}ms]\n{}", name, elapsed_ms, content)
-            }],
-            "structuredContent": {
-                "tool": name,
-                "elapsed_ms": elapsed_ms,
-                "data": data
-            }
-        })
+        match mode {
+            "compact" => json!({
+                "content": [{ "type": "text", "text": serde_json::to_string(&data).unwrap_or(content) }],
+                "structuredContent": { "tool": name, "elapsed_ms": elapsed_ms, "response_mode": "compact" }
+            }),
+            "text" => json!({
+                "content": [{ "type": "text", "text": content }],
+                "structuredContent": { "tool": name, "elapsed_ms": elapsed_ms, "response_mode": "text" }
+            }),
+            _ => json!({
+                "content": [{ "type": "text", "text": format!("[findex:{name} {elapsed_ms}ms] structuredContent.data") }],
+                "structuredContent": {
+                    "tool": name,
+                    "elapsed_ms": elapsed_ms,
+                    "response_mode": "structured",
+                    "data": data
+                }
+            }),
+        }
     }
 
     fn tool_error_result(name: &str, error: &McpError, elapsed_ms: u128) -> Value {
@@ -956,7 +1037,12 @@ impl McpServer {
     ) -> Value {
         if !matches!(
             name,
-            "search_code" | "repo_map" | "reindex" | "semantic_diff" | "get_context_bundle"
+            "search_code"
+                | "repo_map"
+                | "reindex"
+                | "semantic_diff"
+                | "get_context_bundle"
+                | "fetch_context"
         ) {
             return Self::error_response(
                 request.id.clone(),
@@ -980,7 +1066,12 @@ impl McpServer {
                 let elapsed = started.elapsed().as_millis();
                 let (mut result, failed) = match execution {
                     Ok(content) => (
-                        Self::tool_success_result(&tool_name, content, elapsed),
+                        Self::tool_success_result(
+                            &tool_name,
+                            content,
+                            elapsed,
+                            response_mode(&args),
+                        ),
                         false,
                     ),
                     Err(error) => (Self::tool_error_result(&tool_name, &error, elapsed), true),
@@ -1429,6 +1520,124 @@ impl McpServer {
         Ok(serde_json::to_string_pretty(&self.storage.list_files()?)?)
     }
 
+    fn tool_find_files(&self, args: &Value) -> Result<String, McpError> {
+        let query = args
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::MissingParameter("query".to_string()))?;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(50)
+            .clamp(1, 500) as usize;
+        let terms = crate::search::query_intent::code_tokens(query);
+        let mut matches: Vec<_> = self
+            .storage
+            .list_files()?
+            .into_iter()
+            .filter(|file| {
+                let path = file
+                    .path
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .to_ascii_lowercase();
+                if terms.is_empty() {
+                    path.contains(&query.to_ascii_lowercase())
+                } else {
+                    terms.iter().all(|term| path.contains(term))
+                }
+            })
+            .collect();
+        matches.sort_by(|left, right| {
+            left.path
+                .components()
+                .count()
+                .cmp(&right.path.components().count())
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        matches.truncate(limit);
+        Ok(serde_json::to_string_pretty(&json!({
+            "query": query,
+            "count": matches.len(),
+            "files": matches
+        }))?)
+    }
+
+    fn tool_fetch_file(&self, args: &Value) -> Result<String, McpError> {
+        let requested = args
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| McpError::MissingParameter("path".to_string()))?;
+        let normalized = |value: &str| {
+            let value = value.replace('\\', "/");
+            if cfg!(windows) {
+                value.to_ascii_lowercase()
+            } else {
+                value
+            }
+        };
+        let indexed = self
+            .storage
+            .list_files()?
+            .into_iter()
+            .find(|file| normalized(&file.path.to_string_lossy()) == normalized(requested))
+            .ok_or_else(|| {
+                McpError::InvalidRequest(
+                    "fetch_file only reads exact paths already present in the Findex index"
+                        .to_string(),
+                )
+            })?;
+        let start = args
+            .get("start_line")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .max(1) as usize;
+        let requested_end = args
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .unwrap_or((start + 399) as u64) as usize;
+        let end = requested_end.max(start).min(start.saturating_add(1_999));
+        let budget = args
+            .get("token_budget")
+            .and_then(Value::as_u64)
+            .unwrap_or(4_096)
+            .clamp(64, 32_768) as usize;
+        let reader = io::BufReader::new(std::fs::File::open(&indexed.path)?);
+        let mut text = String::new();
+        let mut used_tokens = 0usize;
+        let mut actual_end = start.saturating_sub(1);
+        let mut truncated = requested_end > end;
+        for (index, line) in reader.lines().enumerate() {
+            let line_number = index + 1;
+            if line_number > end {
+                break;
+            }
+            if line_number < start {
+                continue;
+            }
+            let line = line?;
+            let next = format!("{line}\n");
+            let line_tokens = crate::token_budget::count_tokens(&next);
+            if used_tokens.saturating_add(line_tokens) > budget {
+                truncated = true;
+                break;
+            }
+            text.push_str(&next);
+            used_tokens += line_tokens;
+            actual_end = line_number;
+        }
+        Ok(serde_json::to_string_pretty(&json!({
+            "path": indexed.path,
+            "start_line": start,
+            "end_line": actual_end,
+            "requested_end_line": requested_end,
+            "tokens": used_tokens,
+            "token_budget": budget,
+            "truncated": truncated,
+            "text": text
+        }))?)
+    }
+
     fn tool_get_stats(&self) -> Result<String, McpError> {
         let files = self.storage.list_files()?.len();
         let symbols = self.storage.list_symbols()?.len();
@@ -1593,6 +1802,16 @@ impl McpServer {
             "mmr_lambda" => {
                 settings.retrieval.mmr_lambda = value.as_f64().ok_or_else(invalid)? as f32
             }
+            "predictive_query_cache" => {
+                settings.retrieval.predictive_query_cache = value.as_bool().ok_or_else(invalid)?
+            }
+            "query_cache_entries" => {
+                settings.retrieval.query_cache_entries =
+                    value.as_u64().ok_or_else(invalid)? as usize
+            }
+            "query_cache_ttl_seconds" => {
+                settings.retrieval.query_cache_ttl_seconds = value.as_u64().ok_or_else(invalid)?
+            }
             "compute_device" => {
                 settings.runtime.compute_device = value
                     .as_str()
@@ -1624,6 +1843,15 @@ impl McpServer {
                 settings.ui.graph_particles = value.as_bool().ok_or_else(invalid)?
             }
             "graph_labels" => settings.ui.graph_labels = value.as_bool().ok_or_else(invalid)?,
+            "minimize_to_tray" => {
+                settings.ui.minimize_to_tray = value.as_bool().ok_or_else(invalid)?
+            }
+            "cursor_companion" => {
+                settings.ui.cursor_companion = value.as_bool().ok_or_else(invalid)?
+            }
+            "terminal_pointer_input" => {
+                settings.ui.terminal_pointer_input = value.as_bool().ok_or_else(invalid)?
+            }
             _ => {
                 return Err(McpError::InvalidRequest(format!(
                     "unknown setting key: {key}"
@@ -1765,11 +1993,15 @@ mod tests {
             "list_files",
             "get_stats",
             "get_context_bundle",
+            "fetch_context",
+            "fetch_file",
+            "find_files",
             "impact_analysis",
             "get_ast_outline",
             "get_graph_snapshot",
             "get_architecture_overview",
             "get_runtime_profile",
+            "list_models",
             "get_settings",
             "set_setting",
         ] {
@@ -1802,6 +2034,44 @@ mod tests {
             Some(json!({
                 "name": "set_setting",
                 "arguments": { "key": "compute_device", "value": "magic" }
+            })),
+        ));
+        assert_eq!(rejected["result"]["isError"], true);
+    }
+
+    #[test]
+    fn fetch_file_is_bounded_to_indexed_paths_and_response_modes_do_not_duplicate_data() {
+        let (directory, server) = test_server();
+        let path = directory.path().join("sample.rs");
+        std::fs::write(&path, "fn main() {\n    println!(\"ok\");\n}\n").unwrap();
+        server
+            .storage
+            .save_file(&crate::discovery::DiscoveredFile {
+                path: path.clone(),
+                hash: *blake3::hash(b"sample").as_bytes(),
+                size: std::fs::metadata(&path).unwrap().len(),
+            })
+            .unwrap();
+        let response = server.handle_request(request(
+            "tools/call",
+            Some(json!({
+                "name": "fetch_file",
+                "arguments": { "path": path, "start_line": 2, "end_line": 2 }
+            })),
+        ));
+        let data = &response["result"]["structuredContent"]["data"];
+        assert_eq!(data["start_line"], 2);
+        assert!(data["text"].as_str().unwrap().contains("println"));
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("structuredContent.data"));
+
+        let rejected = server.handle_request(request(
+            "tools/call",
+            Some(json!({
+                "name": "fetch_file",
+                "arguments": { "path": directory.path().join("not-indexed.rs") }
             })),
         ));
         assert_eq!(rejected["result"]["isError"], true);

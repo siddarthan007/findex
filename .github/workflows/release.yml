@@ -54,6 +54,11 @@ jobs:
             archive: findex-linux-x86_64.zip
             binary: target/release/findex-cli
             packaged_binary: findex
+          - os: macos-15
+            artifact: findex-cli-macos-aarch64
+            archive: findex-macos-aarch64.zip
+            binary: target/release/findex-cli
+            packaged_binary: findex
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -76,7 +81,7 @@ jobs:
           Copy-Item -LiteralPath '${{ matrix.binary }}' -Destination 'dist/package/${{ matrix.packaged_binary }}'
           Compress-Archive -LiteralPath 'dist/package/${{ matrix.packaged_binary }}' -DestinationPath 'dist/${{ matrix.archive }}' -CompressionLevel Optimal
       - name: Package Linux CLI
-        if: runner.os == 'Linux'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist/package
@@ -108,7 +113,7 @@ jobs:
       - name: Build CLI update manifest
         shell: pwsh
         run: ./scripts/build_cli_manifest.ps1 -Version '${{ github.ref_name }}' -Repository '${{ github.repository }}' -ArtifactsDir dist -Output dist/latest-cli.json
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           draft: true
           generate_release_notes: true
@@ -122,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-24.04]
+        os: [windows-latest, ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -139,13 +144,13 @@ jobs:
         run: npm ci
       - name: Build desktop bundles
         if: github.event_name == 'workflow_dispatch'
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         with:
           projectPath: crates/findex-tauri
           args: --config tauri.updater.conf.json
       - name: Build and attach tagged desktop release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -159,3 +164,25 @@ jobs:
           name: findex-desktop-${{ runner.os }}
           path: target/release/bundle/**/*
           if-no-files-found: error
+
+  release-checksums:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [cli-release, desktop]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: findex-*
+          path: dist
+      - name: Build release checksum catalogue
+        shell: bash
+        run: |
+          mkdir release-assets
+          find dist -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.zip' -o -name '*.sig' -o -name '*.tar.gz' \) -print0 |
+            while IFS= read -r -d '' file; do cp "$file" "release-assets/$(basename "$file")"; done
+          test -n "$(find release-assets -type f -print -quit)"
+          (cd release-assets && sha256sum * | sort -k2) > SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          files: SHA256SUMS

@@ -59,16 +59,23 @@ This file records what is implemented from `implementation_plan.md` and keeps pr
 
 ## Wave 3 production hardening (2026-07-16)
 
+- Fixed packaged Windows startup at its second root cause: the desktop previously opened relative `.findex_db` from the launch working directory and failed under `C:\Windows\System32`. The default is now `<app-local-data>/dev.findex.desktop/index`; `FINDEX_DB_PATH` remains an explicit override. Debug and optimized NSIS payloads both survive System32 launches.
+- Added validated `findex://search`, `open`, `symbol`, `graph`, and `settings` routes, current/startup URL handling, runtime Windows/Linux registration, and single-instance forwarding. Tray Show/Settings/Quit and runtime-gated close-to-tray keep the local MCP/index host available without duplicate writers.
 - Fixed Tauri updater initialization by replacing the invalid `plugins.updater: null` state with a deserializable configuration and avoiding an empty runtime public-key override. A real `tauri dev` process now reaches the event loop without the startup panic.
 - Added versioned index-local settings shared by CLI, TUI, Tauri/Axum, MCP, ingestion, retrieval, and model runtime. Optional indexing/retrieval/VFS/trace/watcher/GPU/UI stages are switchable without rebuilds and validated/clamped before persistence.
 - Search reports requested versus effective retrieval mode and rejects the invalid state where both lexical and semantic retrieval are disabled. Rerank pool, graph hops, graph expansion, structural prefetch, MMR, compute provider, RAM/VRAM policy, and idle release now obey runtime settings.
 - Fixed repository graph snapshots/architecture metrics dropping parser edges whose destination was a symbol name rather than an ID. Batch resolution now uses exact IDs, unique/qualified names, and file/path locality with explicit confidence/evidence metadata.
 - Graph-augmented retrieval now ranks typed bidirectional neighbors with hop decay, execution-trace/Stack-Graph evidence boosts, fan-out bounds, and logarithmic degree penalty so God nodes do not flood context.
+- Natural-language query analysis splits camel/snake/code tokens, expands bounded code-domain concepts, recognizes typed relation intent, and fuses raw lexical, expanded lexical, semantic, reranker, and direct graph evidence independently. A real fixture proves that “code where authentication service calls api” ranks the caller implementation first.
+- A revision/model/settings-aware bounded query cache reuses exact and deterministic paraphrase-equivalent results, expires entries by TTL, and cannot mix different Merkle roots or embedding fingerprints. Runtime settings expose enablement, entry cap, and TTL across CLI, desktop, and MCP; hard 64 MiB process and 4 MiB entry ceilings prevent retention spikes.
+- Architecture orientation now includes directory/module hierarchy, weakly connected structural communities, deterministic source-free summaries, hubs, and internal/boundary edge counts. This is the low-cost GraphRAG-style P0 layer; incremental Leiden communities and LLM community reports remain benchmark-gated rather than implied.
 - Production model acquisition is cache-first and asynchronous. Missing embedding/reranking models use dimension-compatible deterministic fallbacks while background workers download pinned artifacts and hot-swap verified ONNX sessions; fingerprint mismatches rebuild vectors before mixing representations.
 - The desktop graph now supports search/focus, fit, pin, pause, category/edge/confidence filters, 1-3 hop neighborhoods, selected-edge direction/particles, dragging, keyboard controls, and light/dark-aware WebGL rendering. Settings and runtime views expose effective compute/memory policy.
 - The TUI now provides GitHub-light/Nord-dark themes plus typed-edge filters, 0-4 hop focus, selection, pan, zoom, fit, pin/inspection, and motion controls while preserving the supplied smooth ingestion animation.
 - Unified Tauri packages include the release `findex` sidecar (CLI plus TUI). NSIS and WiX add/remove the user PATH safely; DEB/RPM/AppImage mappings expose `/usr/bin/findex`. An actual unsigned NSIS bundle completed successfully after validating the uninstall hook.
 - MCP adds structured search output, `get_settings`, `set_setting`, `findex://architecture`, and `findex://settings`. Runtime gates reject disabled VFS, micro-compile, trace/taint pinning, and structural-prefetch calls explicitly.
+- MCP now exposes drop-in `fetch_context`, exact indexed-only `fetch_file`, `find_files`, and local-only `list_models`. `structured`, `compact`, and `text` response modes avoid duplicating the same payload into both MCP content channels.
+- `findex setup-agent` safely installs MCP plus the portable skill for Codex, Claude, Cursor, and Antigravity, supports `--dry-run`, preserves unrelated servers, backs up JSON configs, and requires `--force` before replacing a different Findex entry.
 
 ## Language and bounded-context hardening
 
@@ -80,10 +87,10 @@ This file records what is implemented from `implementation_plan.md` and keeps pr
 
 ## Correctness and verification
 
-- 85 `findex-core` tests and 2 `findex-cli` tests pass, including real Tauri/Minisign updater-format compatibility, updater transport/path safety, model-profile and vector-fingerprint migration, wide-AST memory bounds, VFS persistence/eviction, graph-pruning behavior, trace validation, complex C#/Ruby/PHP/Swift OOP fixtures, ingestion sprite clipping, and every TUI view.
+- 98 `findex-core` tests and 4 `findex-cli` tests pass, including real Tauri/Minisign updater-format compatibility, updater transport/path safety, relationship-query ranking, query-cache bounds, deterministic architecture summaries, model-profile and vector-fingerprint migration, wide-AST memory bounds, VFS persistence/eviction, graph-pruning behavior, trace validation, complex C#/Ruby/PHP/Swift OOP fixtures, ingestion sprite clipping, pointer navigation, and every TUI view.
 - `cargo test --workspace --locked` and `cargo clippy --workspace --all-targets --locked -- -D warnings` pass.
 - Vue, Merkle, Stack Graph, generated-tree exclusion, normalized AST lookup, connected graph sampling, HTTP header policy, and MCP task lifecycle have direct tests.
-- The production React bundle type-checks/builds; rendered browser QA covered graph settling, architecture, manual query, layout, and console warnings/errors. Tauri produces the desktop binary plus NSIS and WiX installers on Windows.
+- The production React bundle type-checks/builds; rendered browser QA covered light/dark graph settling, pause/resume, architecture, manual search, settings transitions, result rendering, layout, and console warnings/errors. Optimized Tauri produces the desktop binary plus a unified NSIS installer containing the CLI/TUI sidecar; an isolated install was launched from System32 and deep-linked without spawning a second instance.
 
 ## Deliberately future work
 

@@ -1,12 +1,13 @@
-import { FormEvent, lazy, Suspense, useEffect, useState } from 'react';
+import { FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
-  Activity, ArrowDownToLine, Braces, Boxes, Cpu, Database, FileCode2, GitBranch,
+  Activity, ArrowDownToLine, Braces, Boxes, Check, Cpu, Database, Download, FileCode2, GitBranch,
   Moon, Network, RotateCcw, Search, Settings2, ShieldCheck, SquareTerminal, Sun, Workflow, X
 } from 'lucide-react';
 import { api } from './api';
 import type {
-  ArchitectureOverview, AstNode, AstOutline, DesktopUpdateInfo, FindexSettings, GraphNode, GraphSnapshot, ImpactReport,
-  RuntimeProfile, SearchResult, Stats, ThemePreference
+  ArchitectureOverview, AstNode, AstOutline, DeepLinkPayload, DesktopUpdateInfo, FindexSettings, GraphNode, GraphSnapshot, ImpactReport,
+  ModelStatus, RuntimeProfile, SearchResult, SourcePreview, Stats, ThemePreference
 } from './types';
 
 type View = 'graph' | 'architecture' | 'search' | 'ast' | 'query' | 'runtime' | 'settings';
@@ -25,6 +26,7 @@ function App() {
   const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [impact, setImpact] = useState<ImpactReport | null>(null);
+  const [source, setSource] = useState<SourcePreview | null>(null);
   const [searchInput, setSearchInput] = useState('');
   const [searchMode, setSearchMode] = useState('hybrid');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -47,6 +49,49 @@ function App() {
       })
       .catch(cause => setError(String(cause)))
       .finally(() => setBusy(false));
+  }, []);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let active = true;
+    let unlisten: UnlistenFn | undefined;
+    const apply = async (payload: DeepLinkPayload) => {
+      if (!active) return;
+      const parsed = new URL(payload.url);
+      if (payload.route === 'settings' || payload.route === 'graph') {
+        setView(payload.route);
+        return;
+      }
+      const rawQuery = payload.route === 'symbol'
+        ? parsed.searchParams.get('id')
+        : payload.route === 'open'
+          ? parsed.searchParams.get('path') ?? parsed.searchParams.get('root')
+          : parsed.searchParams.get('q') ?? parsed.searchParams.get('query');
+      const queryText = rawQuery?.trim().slice(0, 512);
+      if (!queryText) return;
+      const requestedMode = parsed.searchParams.get('mode') ?? (payload.route === 'search' ? 'hybrid' : 'lexical');
+      const mode = ['hybrid', 'lexical', 'semantic'].includes(requestedMode) ? requestedMode : 'hybrid';
+      setSearchInput(queryText);
+      setSearchMode(mode);
+      setView('search');
+      setBusy(true);
+      try {
+        const results = await api.search(queryText, mode);
+        if (!active) return;
+        setSearchResults(results);
+        if (payload.route === 'symbol' && results[0]) chooseSearchResult(results[0]);
+      } catch (cause) {
+        if (active) setError(`Deep-link search failed: ${String(cause)}`);
+      } finally {
+        if (active) setBusy(false);
+      }
+    };
+    void (async () => {
+      const pending = await api.pendingDeepLink();
+      if (pending) await apply(pending);
+      unlisten = await listen<DeepLinkPayload>('findex-deep-link', event => { void apply(event.payload); });
+    })().catch(cause => setError(`Deep-link listener failed: ${String(cause)}`));
+    return () => { active = false; unlisten?.(); };
   }, []);
 
   const resolvedTheme = settings?.ui.theme === 'light' || settings?.ui.theme === 'dark'
@@ -95,7 +140,11 @@ function App() {
   useEffect(() => {
     if (!selected) return;
     setImpact(null);
-    api.impact(selected.id).then(setImpact).catch(() => setImpact(null));
+    setSource(null);
+    api.impact(selected.id).then(report => {
+      setImpact(report);
+      if (report) void api.source(report.symbol).then(setSource).catch(() => setSource(null));
+    }).catch(() => setImpact(null));
   }, [selected?.id]);
 
   useEffect(() => {
@@ -236,6 +285,7 @@ function App() {
             <code className="symbol-id">{selected.id}</code>
             <dl className="facts"><div><dt>Degree</dt><dd>{selected.degree}</dd></div><div><dt>Risk</dt><dd className={impact?.god_node ? 'danger' : ''}>{impact ? `${impact.risk_score.toFixed(1)}/100` : '—'}</dd></div><div><dt>Incoming</dt><dd>{impact?.incoming_edges ?? '—'}</dd></div><div><dt>Outgoing</dt><dd>{impact?.outgoing_edges ?? '—'}</dd></div></dl>
             <section className="inspector-section"><h2>Location</h2><p>{selected.file_path}</p></section>
+            {source && <section className="inspector-section source-section"><h2>Exact indexed range · L{source.start_line}–{source.end_line}</h2><CodePreview source={source} /></section>}
             <section className="inspector-section"><h2>Affected files</h2>{impact?.affected_files.slice(0, 8).map(path => <p className="path" key={path}>{compactPath(path)}</p>) ?? <p className="muted">Select an indexed node for impact data.</p>}</section>
             <section className="inspector-section"><h2>Retrieval guidance</h2><p className="muted">Inspect impact before editing. Prefer exact AST ranges or a bounded context bundle over whole-file reads.</p></section>
           </> : <Empty title="Nothing selected" detail="Choose a node or search result." />}
@@ -258,6 +308,7 @@ function App() {
         <span>WebGL · Axum loopback · MCP 2025-11-25</span>
         {error && <span className="footer-error">{error}</span>}
       </footer>
+      <PointerCompanion enabled={settings?.ui.cursor_companion !== false && settings?.ui.motion !== false} />
     </div>
   );
 }
@@ -284,6 +335,8 @@ function ArchitectureView({ overview }: { overview: ArchitectureOverview | null 
       <section><h2>Languages</h2>{ranked(overview.languages).map(([name, count]) => <p key={name}><span>{name}</span><b>{count.toLocaleString()}</b></p>)}</section>
       <section><h2>Layers</h2>{ranked(overview.layers).map(([name, count]) => <p key={name}><span>{name}</span><b>{count.toLocaleString()}</b></p>)}</section>
       <section className="wide"><h2>Highest-coupling symbols</h2>{overview.hubs.slice(0, 20).map(hub => <p key={hub.symbol.id}><span><code>{hub.symbol.kind}</code> {hub.symbol.name}<small>{compactPath(hub.symbol.file_path)}:{hub.symbol.line}</small></span><b>{hub.incoming} in · {hub.outgoing} out</b></p>)}</section>
+      <section className="wide"><h2>Module hierarchy</h2>{overview.modules.slice(0, 24).map(module => <p key={module.path} title={module.summary}><span>{module.path}<small>{module.dominant_language} · {module.dominant_layer}</small></span><b>{module.symbols.toLocaleString()} symbols · {module.files} files</b></p>)}</section>
+      <section className="wide"><h2>Graph communities</h2>{overview.communities.slice(0, 16).map(community => <p key={community.id} title={community.summary}><span>{community.id}<small>{community.hubs.slice(0, 3).map(hub => hub.name).join(' · ') || community.summary}</small></span><b>{community.symbols} nodes · {community.internal_edges} internal · {community.boundary_edges} boundary</b></p>)}</section>
       <section><h2>Contracts</h2>{overview.contracts.slice(0, 20).map(symbol => <p key={symbol.id}><span>{symbol.name}<small>{symbol.kind}</small></span><b>L{symbol.line}</b></p>)}</section>
       <section><h2>Entrypoints</h2>{overview.entrypoints.slice(0, 20).map(symbol => <p key={symbol.id}><span>{symbol.name}<small>{compactPath(symbol.file_path)}</small></span><b>L{symbol.line}</b></p>)}</section>
     </div>
@@ -311,7 +364,11 @@ function SettingsView({ settings, onSave, busy }: {
   busy: boolean;
 }) {
   const [draft, setDraft] = useState(settings);
+  const [models, setModels] = useState<ModelStatus[]>([]);
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [modelError, setModelError] = useState('');
   useEffect(() => setDraft(settings), [settings]);
+  useEffect(() => { void api.models().then(setModels); }, []);
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
   const setIndexing = (key: keyof FindexSettings['indexing'], value: boolean) =>
     setDraft(current => ({ ...current, indexing: { ...current.indexing, [key]: value } }));
@@ -344,8 +401,11 @@ function SettingsView({ settings, onSave, busy }: {
         <Toggle label="Cross-encoder reranking" detail="Rerank only the bounded first-stage pool." checked={draft.retrieval.reranking} onChange={value => setRetrieval('reranking', value)} />
         <Toggle label="Graph expansion" detail="Pull typed neighbors around top retrieval anchors." checked={draft.retrieval.graph_expansion} onChange={value => setRetrieval('graph_expansion', value)} />
         <Toggle label="Structural prefetch" detail="Predict likely next context from graph locality." checked={draft.retrieval.structural_prefetch} onChange={value => setRetrieval('structural_prefetch', value)} />
+        <Toggle label="Predictive query cache" detail="Reuse revision-safe results and deterministic paraphrase keys without model calls." checked={draft.retrieval.predictive_query_cache} onChange={value => setRetrieval('predictive_query_cache', value)} />
         <NumberSetting label="Graph hops" value={draft.retrieval.graph_hops} min={0} max={4} onChange={value => setRetrieval('graph_hops', value)} />
         <NumberSetting label="Candidate pool" value={draft.retrieval.candidate_limit} min={4} max={200} onChange={value => setRetrieval('candidate_limit', value)} />
+        <NumberSetting label="Query cache entries" value={draft.retrieval.query_cache_entries} min={1} max={2048} onChange={value => setRetrieval('query_cache_entries', value)} />
+        <NumberSetting label="Query cache TTL (seconds)" value={draft.retrieval.query_cache_ttl_seconds} min={5} max={86400} step={5} onChange={value => setRetrieval('query_cache_ttl_seconds', value)} />
         <NumberSetting label="Default token budget" value={draft.retrieval.default_token_budget} min={128} max={32768} step={128} onChange={value => setRetrieval('default_token_budget', value)} />
       </SettingsSection>
 
@@ -358,11 +418,32 @@ function SettingsView({ settings, onSave, busy }: {
         <p className="settings-note">Device changes release active ONNX sessions immediately. A model-profile change takes effect when Findex next creates its model components.</p>
       </SettingsSection>
 
+      <SettingsSection title="Local model catalog" detail="Pinned revisions, background downloads, and explicit accuracy/latency profiles.">
+        {(['fast', 'balanced', 'quality'] as const).map(profile => {
+          const profileModels = models.filter(model => model.profile === profile);
+          const ready = profileModels.length === 2 && profileModels.every(model => model.installed);
+          return <div className="model-row" key={profile}>
+            <span><b>{profile}</b><small>{profile === 'fast' ? '384d MiniLM · lowest latency' : profile === 'balanced' ? 'Quantized code embedding + reranker' : 'Full-precision code models'}</small></span>
+            <span className={ready ? 'model-state ready' : 'model-state'}>{ready ? <><Check size={12} />Ready</> : 'Not cached'}</span>
+            <button disabled={downloading !== null || ready} onClick={() => {
+              setDownloading(profile);
+              setModelError('');
+              void api.downloadModels(profile).then(() => api.models()).then(setModels).catch(cause => setModelError(`Model download failed: ${String(cause)}`)).finally(() => setDownloading(null));
+            }}><Download size={13} />{downloading === profile ? 'Downloading…' : ready ? 'Installed' : 'Download'}</button>
+          </div>;
+        })}
+        {modelError && <p className="settings-error">{modelError}</p>}
+        <p className="settings-note">Downloads use the shared Hugging Face cache and immutable commit revisions. Findex never deletes shared model files from this screen.</p>
+      </SettingsSection>
+
       <SettingsSection title="Appearance" detail="GitHub-derived tokens with restrained motion and native system preference.">
         <SelectSetting label="Theme" value={draft.ui.theme} options={['system', 'light', 'dark']} onChange={value => setUi('theme', value as ThemePreference)} />
         <Toggle label="Motion" detail="Short state transitions and status animation." checked={draft.ui.motion} onChange={value => setUi('motion', value)} />
         <Toggle label="Graph particles" detail="Animate only edges adjacent to the selected node." checked={draft.ui.graph_particles} onChange={value => setUi('graph_particles', value)} />
         <Toggle label="Graph labels" detail="Show detailed hover labels for graph nodes." checked={draft.ui.graph_labels} onChange={value => setUi('graph_labels', value)} />
+        <Toggle label="Minimize to tray" detail="Keep indexing and local agent access available after closing the window." checked={draft.ui.minimize_to_tray} onChange={value => setUi('minimize_to_tray', value)} />
+        <Toggle label="Pointer companion" detail="Show the restrained cursor-following ASCII marker; reduced-motion always disables it." checked={draft.ui.cursor_companion} onChange={value => setUi('cursor_companion', value)} />
+        <Toggle label="Terminal pointer input" detail="Enable TUI mouse capture; touch terminals may translate gestures into mouse events." checked={draft.ui.terminal_pointer_input} onChange={value => setUi('terminal_pointer_input', value)} />
       </SettingsSection>
     </div>
   </div>;
@@ -390,6 +471,48 @@ function Meter({ label, value, detail, warning = false }: { label: string; value
 
 function Empty({ title, detail }: { title: string; detail: string }) {
   return <div className="empty"><Boxes size={22} /><b>{title}</b><p>{detail}</p></div>;
+}
+
+function CodePreview({ source }: { source: SourcePreview }) {
+  return <pre className="source-code">{source.text.split('\n').map((line, index) => <code key={index}><span className="line-number">{source.start_line + index}</span>{highlightCodeLine(line)}</code>)}</pre>;
+}
+
+function highlightCodeLine(line: string) {
+  const pattern = /(\/\/.*$|#.*$|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:async|await|class|const|def|enum|fn|function|impl|import|interface|let|match|new|pub|return|struct|trait|type|use|var)\b|\b\d+(?:\.\d+)?\b)/g;
+  const fragments: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const match of line.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) fragments.push(line.slice(cursor, index));
+    const token = match[0];
+    const className = token.startsWith('//') || token.startsWith('#') ? 'syntax-comment'
+      : /^["'`]/.test(token) ? 'syntax-string'
+        : /^\d/.test(token) ? 'syntax-number' : 'syntax-keyword';
+    fragments.push(<span className={className} key={`${index}-${token}`}>{token}</span>);
+    cursor = index + token.length;
+  }
+  if (cursor < line.length) fragments.push(line.slice(cursor));
+  return fragments;
+}
+
+function PointerCompanion({ enabled }: { enabled: boolean }) {
+  const marker = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!enabled || window.matchMedia('(prefers-reduced-motion: reduce)').matches || window.matchMedia('(pointer: coarse)').matches) return;
+    let frame = 0;
+    const move = (event: PointerEvent) => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (marker.current) {
+          marker.current.style.opacity = '1';
+          marker.current.style.transform = `translate3d(${event.clientX + 12}px, ${event.clientY + 10}px, 0)`;
+        }
+      });
+    };
+    window.addEventListener('pointermove', move, { passive: true });
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener('pointermove', move); };
+  }, [enabled]);
+  return enabled ? <span ref={marker} className="pointer-companion" aria-hidden="true">:&gt;</span> : null;
 }
 
 function compactPath(path: string) { return path.split(/[\\/]/).slice(-3).join('/'); }

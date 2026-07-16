@@ -2,6 +2,19 @@
 
 ## Install and package
 
+Latest signed release (desktop + CLI + TUI):
+
+```powershell
+irm https://raw.githubusercontent.com/siddarthan007/findex/main/install.ps1 | iex
+```
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/siddarthan007/findex/main/install.sh | sh
+# or: wget -qO- https://raw.githubusercontent.com/siddarthan007/findex/main/install.sh | sh
+```
+
+The bootstrap scripts select the native installer from the latest GitHub release and require its `SHA256SUMS` entry to match before execution. Set `FINDEX_SETUP_AGENT=all` for the shell installer, or download `install.ps1` and pass `-SetupAgent all`, to install MCP plus the portable skill for supported coding agents.
+
 Windows source install:
 
 ```powershell
@@ -20,6 +33,18 @@ The source installers build a release CLI, place `findex` under `~/.findex/bin`,
 
 The Tauri distribution is the unified human installer: it bundles the same release CLI binary that provides both CLI commands and `findex tui`. Windows NSIS/MSI packages register the install directory on the user PATH; Linux packages map the sidecar to `/usr/bin/findex`. Installing one platform package therefore installs desktop, CLI, and TUI together.
 
+Agent setup is safe and repeatable:
+
+```sh
+findex setup-agent all --dry-run
+findex setup-agent codex
+findex setup-agent claude
+findex setup-agent cursor
+findex setup-agent antigravity
+```
+
+Codex and Cursor share the portable user skill at `~/.agents/skills/findex`. Claude uses `~/.claude/skills/findex`; Antigravity uses `~/.gemini/skills/findex`. Cursor and Antigravity JSON are merged without deleting other MCP servers and receive a backup before replacement. Codex and Claude registration uses their official CLI. Existing different Findex entries are not replaced unless `--force` is explicit.
+
 Build the desktop bundle from `crates/findex-tauri`:
 
 ```sh
@@ -29,6 +54,8 @@ npm run tauri:build -- --config tauri.updater.conf.json
 ```
 
 For a local unsigned Windows installer smoke test, use `npm run build:installer:unsigned`. Release bundles keep updater artifact signing enabled.
+
+Desktop deep links are allowlisted and parameterized: `findex://search?q=...&mode=hybrid`, `findex://symbol?id=...`, `findex://open?path=...`, `findex://graph`, and `findex://settings`. Treat all URL parameters as untrusted input; the application bounds URL/query length and never interprets a deep link as a shell command.
 
 Tagged GitHub releases build locked CLI artifacts and Tauri installers on Windows/Linux. Production signing credentials must be configured in the release environment; do not embed them in the repository.
 
@@ -83,6 +110,8 @@ Environment variables below remain deployment overrides and take precedence wher
 - `FINDEX_EMBEDDING_BATCH`: explicit embedding batch, otherwise selected from RAM/GPU headroom.
 - `FINDEX_VECTOR_QUANTIZATION=bf16|i8|b1`: accuracy/storage tradeoff. Benchmark retrieval quality before changing an existing index.
 - `FINDEX_VFS_MAX_MB` and `FINDEX_VFS_MAX_FILES`: hard shadow-store bounds with LRU eviction.
+
+The predictive query cache is Merkle/model/settings-aware, TTL-expiring, and LRU-evicted. Persisted settings cap logical entries at 2048; the process also enforces a 64 MiB hard ceiling and rejects any single result set estimated above 4 MiB.
 
 Do not maximize Rayon and ONNX pools independently; that oversubscribes CPUs and increases tail latency. Run `findex doctor --format json` after tuning.
 

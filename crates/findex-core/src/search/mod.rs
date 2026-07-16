@@ -3,5 +3,7 @@ pub mod hybrid;
 pub mod lexical;
 pub mod local_embedder;
 pub mod mmr;
+pub mod query_cache;
+pub mod query_intent;
 pub mod rerank;
 pub mod vector;

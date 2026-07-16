@@ -49,6 +49,7 @@ export interface SymbolRecord {
 }
 
 export interface SearchResult { score: number; symbol: SymbolRecord }
+export interface SourcePreview { path: string; start_line: number; end_line: number; text: string; truncated: boolean }
 
 export interface AstNode {
   id: string;
@@ -89,6 +90,8 @@ export interface ArchitectureOverview {
   contracts: ArchitectureSymbol[];
   hubs: Array<{ symbol: ArchitectureSymbol; incoming: number; outgoing: number }>;
   cross_file_edges: number;
+  modules: Array<{ path: string; files: number; symbols: number; dominant_layer: string; dominant_language: string; summary: string }>;
+  communities: Array<{ id: string; symbols: number; files: number; internal_edges: number; boundary_edges: number; hubs: ArchitectureSymbol[]; summary: string }>;
 }
 
 export interface RuntimeProfile {
@@ -137,6 +140,9 @@ export interface FindexSettings {
     candidate_limit: number;
     default_token_budget: number;
     mmr_lambda: number;
+    predictive_query_cache: boolean;
+    query_cache_entries: number;
+    query_cache_ttl_seconds: number;
   };
   runtime: {
     compute_device: ComputeDevice;
@@ -150,7 +156,27 @@ export interface FindexSettings {
     motion: boolean;
     graph_particles: boolean;
     graph_labels: boolean;
+    minimize_to_tray: boolean;
+    cursor_companion: boolean;
+    terminal_pointer_input: boolean;
   };
+}
+
+export interface DeepLinkPayload {
+  url: string;
+  route: 'search' | 'open' | 'symbol' | 'graph' | 'settings';
+}
+
+export interface ModelStatus {
+  kind: 'embedding' | 'reranker';
+  profile: 'fast' | 'balanced' | 'quality';
+  repository: string;
+  revision: string;
+  artifact: string;
+  installed: boolean;
+  model_path?: string;
+  tokenizer_path?: string;
+  error?: string;
 }
 
 export interface DesktopUpdateInfo {
