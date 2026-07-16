@@ -31,7 +31,7 @@
           { "key": "Referrer-Policy", "value": "no-referrer" },
           { "key": "X-Content-Type-Options", "value": "nosniff" },
           { "key": "X-Frame-Options", "value": "DENY" },
-          { "key": "Content-Security-Policy", "value": "default-src 'none'; connect-src https://*.googleapis.com https://*.firebaseapp.com http://127.0.0.1:*; img-src https://lh3.googleusercontent.com data:; script-src https://www.gstatic.com; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" }
+          { "key": "Content-Security-Policy", "value": "default-src 'none'; connect-src https://*.googleapis.com https://*.firebaseapp.com http://127.0.0.1:*; img-src https://lh3.googleusercontent.com data:; script-src 'self' https://www.gstatic.com https://apis.google.com; frame-src https://*.firebaseapp.com; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" }
         ]
       }
     ]

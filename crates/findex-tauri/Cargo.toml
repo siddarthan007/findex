@@ -1,6 +1,6 @@
 [package]
 name = "findex-tauri"
-version = "0.3.0"
+version = "3.1.0"
 edition = "2021"
 
 [dependencies]
@@ -15,6 +15,7 @@ axum = { workspace = true }
 tokio = { workspace = true }
 tower-http = { workspace = true, features = ["cors"] }
 uuid = { workspace = true }
+rfd = "0.14.0"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

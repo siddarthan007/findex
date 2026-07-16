@@ -50,6 +50,9 @@ struct PendingDesktopUpdate(Mutex<Option<Update>>);
 #[derive(Default)]
 struct PendingDeepLink(Mutex<Option<DeepLinkPayload>>);
 
+#[derive(Default)]
+struct CliIndexDir(Mutex<Option<PathBuf>>);
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopUpdateInfo {
@@ -82,6 +85,7 @@ struct StatsView {
     vectors: usize,
     merkle_root: Option<String>,
     stack_graphs: Option<findex_core::stack_graphs::StackGraphStats>,
+    index_root: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,6 +251,10 @@ fn stats(state: &AppState) -> Result<StatsView, String> {
     } else {
         0
     };
+    let index_root: Option<String> = state
+        .storage
+        .get_metadata("index:root")
+        .map_err(|error| error.to_string())?;
     Ok(StatsView {
         files: files.len(),
         symbols: symbols.len(),
@@ -261,6 +269,7 @@ fn stats(state: &AppState) -> Result<StatsView, String> {
             .storage
             .get_metadata("stack-graphs:last")
             .map_err(|error| error.to_string())?,
+        index_root,
     })
 }
 
@@ -519,6 +528,25 @@ async fn install_update(pending: State<'_, PendingDesktopUpdate>) -> Result<(), 
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn select_directory() -> Result<Option<String>, String> {
+    let result = rfd::FileDialog::new()
+        .pick_folder()
+        .map(|path| path.to_string_lossy().to_string());
+    Ok(result)
+}
+
+#[tauri::command]
+fn take_cli_index_dir(state: State<'_, CliIndexDir>) -> Result<Option<String>, String> {
+    let result = state
+        .0
+        .lock()
+        .map_err(|error| error.to_string())?
+        .take()
+        .map(|path| path.to_string_lossy().to_string());
+    Ok(result)
+}
+
 async fn api_stats(AxumState(state): AxumState<Arc<AppState>>, headers: HeaderMap) -> Response {
     authorized_json(&state, &headers, || stats(&state))
 }
@@ -718,6 +746,26 @@ fn main() {
         .manage(PendingDesktopUpdate::default())
         .manage(PendingDeepLink::default())
         .setup(move |app| {
+            let mut index_dir = None;
+            let args: Vec<String> = std::env::args().collect();
+            for i in 0..args.len() {
+                if args[i] == "--index-dir" && i + 1 < args.len() {
+                    index_dir = Some(PathBuf::from(&args[i + 1]));
+                } else if args[i].starts_with("--index-dir=") {
+                    let parts: Vec<&str> = args[i].splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        index_dir = Some(PathBuf::from(parts[1]));
+                    }
+                }
+            }
+            if index_dir.is_none() && args.len() > 1 {
+                let last_arg = PathBuf::from(&args[args.len() - 1]);
+                if last_arg.is_dir() {
+                    index_dir = Some(last_arg);
+                }
+            }
+            app.manage(CliIndexDir(Mutex::new(index_dir)));
+
             let db_path = match db_override.clone() {
                 Some(path) => path,
                 None => app.path().app_local_data_dir()?.join("index"),
@@ -821,7 +869,9 @@ fn main() {
             list_models,
             download_model_profile,
             check_for_update,
-            install_update
+            install_update,
+            select_directory,
+            take_cli_index_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

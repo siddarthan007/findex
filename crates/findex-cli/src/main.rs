@@ -154,6 +154,11 @@ enum Commands {
     },
     /// Launch the interactive terminal UI
     Tui,
+    /// Launch the Findex GUI
+    Gui {
+        /// The codebase directory to index and open in the GUI
+        path: Option<PathBuf>,
+    },
     /// Show index statistics
     Status,
     /// Build a token-bounded context package for an agent task
@@ -802,6 +807,39 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tui => {
             let mut app = tui::App::new(cli.db_path)?;
             app.run()?;
+        }
+        Commands::Gui { path } => {
+            let mut exe_path = std::env::current_exe()?;
+            #[cfg(windows)]
+            exe_path.set_file_name("findex-tauri.exe");
+            #[cfg(not(windows))]
+            exe_path.set_file_name("findex-tauri");
+
+            let mut cmd = if exe_path.exists() {
+                std::process::Command::new(exe_path)
+            } else {
+                #[cfg(windows)]
+                { std::process::Command::new("findex-tauri.exe") }
+                #[cfg(not(windows))]
+                { std::process::Command::new("findex-tauri") }
+            };
+
+            cmd.env("FINDEX_DB_PATH", &cli.db_path);
+
+            if let Some(ref dir) = path {
+                let abs_path = if dir.is_absolute() {
+                    dir.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(dir))
+                        .unwrap_or_else(|_| dir.clone())
+                };
+                cmd.arg("--index-dir");
+                cmd.arg(abs_path);
+            }
+
+            println!("Launching Findex GUI...");
+            cmd.spawn()?;
         }
         Commands::Status => {
             let storage = Storage::open(&cli.db_path)?;

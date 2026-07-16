@@ -24,7 +24,7 @@ const state = parameters.get('state') ?? '';
 
 if (!callback || !/^[A-Za-z0-9-]{32,64}$/.test(state)) {
   button.disabled = true;
-  setStatus('This sign-in request is invalid or expired.', true);
+  setStatus('Please initiate sign-in from the Findex desktop, CLI, or TUI app. Direct sign-ins from this URL are not supported.', true);
 }
 
 button.addEventListener('click', async () => {

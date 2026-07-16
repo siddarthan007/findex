@@ -1,0 +1,11 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for the Findex desktop application",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "deep-link:default",
+    "updater:default",
+    "allow-all-commands"
+  ]
+}

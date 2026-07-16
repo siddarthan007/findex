@@ -147,5 +147,17 @@ export const api = {
   async installUpdate(): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>('install_update');
+  },
+  async reindex(root: string): Promise<any> {
+    if (!isTauri()) return null;
+    return invoke('reindex', { root });
+  },
+  async takeCliIndexDir(): Promise<string | null> {
+    if (!isTauri()) return null;
+    return invoke<string | null>('take_cli_index_dir');
+  },
+  async selectDirectory(): Promise<string | null> {
+    if (!isTauri()) return null;
+    return invoke<string | null>('select_directory');
   }
 };
