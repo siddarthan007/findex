@@ -2213,7 +2213,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "findex-cli"
-version = "3.1.1"
+version = "3.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "findex-core"
-version = "3.1.1"
+version = "3.1.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "findex-tauri"
-version = "3.1.1"
+version = "3.1.5"
 dependencies = [
  "axum",
  "findex-core",

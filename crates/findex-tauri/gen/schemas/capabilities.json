@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for the Findex desktop application","local":true,"windows":["main"],"permissions":["core:default","deep-link:default","updater:default","allow-all-commands"]}}
+{"default":{"identifier":"default","description":"Default capability for the main Findex window. Grants core Tauri APIs plus every custom command exposed by the Rust backend.","local":true,"windows":["main"],"permissions":["core:default","deep-link:default","updater:default","allow-all-commands"]}}

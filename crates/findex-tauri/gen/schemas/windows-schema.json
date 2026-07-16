@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Allows all custom commands in the main binary",
+          "description": "Allows all custom commands defined in the main binary.",
           "type": "string",
           "const": "allow-all-commands",
-          "markdownDescription": "Allows all custom commands in the main binary"
+          "markdownDescription": "Allows all custom commands defined in the main binary."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

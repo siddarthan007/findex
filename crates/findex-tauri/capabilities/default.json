@@ -1,6 +1,7 @@
 {
+  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the Findex desktop application",
+  "description": "Default capability for the main Findex window. Grants core Tauri APIs plus every custom command exposed by the Rust backend.",
   "windows": ["main"],
   "permissions": [
     "core:default",

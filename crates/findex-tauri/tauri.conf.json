@@ -1,6 +1,6 @@
 {
   "productName": "Findex",
-  "version": "3.1.1",
+  "version": "3.1.5",
   "identifier": "dev.findex.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",

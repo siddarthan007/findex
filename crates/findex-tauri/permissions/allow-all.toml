@@ -1,7 +1,16 @@
+# Grants every custom command defined in src/main.rs.
+#
+# Tauri 2 ACL schema (from tauri-utils/src/acl/mod.rs):
+#   struct Permission { identifier, description, commands: Commands, ... }
+#   struct Commands  { allow: Vec<String>, deny: Vec<String> }
+#
+# A bare top-level `allow = [...]` is silently dropped because it does not
+# match any field on `Permission`, which leaves `commands.allow` empty and
+# blocks every command at runtime. The list MUST live under `commands.allow`.
 [[permission]]
 identifier = "allow-all-commands"
-description = "Allows all custom commands in the main binary"
-allow = [
+description = "Allows all custom commands defined in the main binary."
+commands.allow = [
   "get_api_config",
   "take_pending_deep_link",
   "get_graph_data",
@@ -24,5 +33,5 @@ allow = [
   "check_for_update",
   "install_update",
   "select_directory",
-  "take_cli_index_dir"
+  "take_cli_index_dir",
 ]
