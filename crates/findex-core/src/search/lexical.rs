@@ -194,7 +194,7 @@ impl LexicalIndex {
         query_parser.set_field_boost(self.name_ngram_field, 1.5);
         let query = query_parser.parse_query(query_str)?;
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
         let mut results = Vec::new();
 
         for (score, doc_address) in top_docs {
@@ -223,7 +223,7 @@ impl LexicalIndex {
             .try_into()?;
         let searcher = reader.searcher();
         let query = RegexQuery::from_pattern(&pattern.to_lowercase(), self.name_raw_field)?;
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(limit).order_by_score())?;
 
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {

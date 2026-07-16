@@ -1,14 +1,14 @@
 //! Persisted production settings shared by CLI, TUI, desktop, and MCP.
 
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use thiserror::Error;
 
 pub const SETTINGS_FILE: &str = "settings.json";
-pub const SETTINGS_VERSION: u32 = 1;
+pub const SETTINGS_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum SettingsError {
@@ -193,6 +193,19 @@ impl Default for UiSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct TelemetrySettings {
+    /// Master consent gate. No event leaves the device while this is false.
+    pub enabled: bool,
+    pub crash_reports: bool,
+    pub include_hardware: bool,
+    pub include_project_metrics: bool,
+    /// Reserved for an explicit, per-report diagnostic action. Findex never
+    /// samples source code automatically, even when this gate is enabled.
+    pub include_source_samples: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FindexSettings {
@@ -201,6 +214,7 @@ pub struct FindexSettings {
     pub retrieval: RetrievalSettings,
     pub runtime: RuntimeSettings,
     pub ui: UiSettings,
+    pub telemetry: TelemetrySettings,
 }
 
 impl Default for FindexSettings {
@@ -211,6 +225,7 @@ impl Default for FindexSettings {
             retrieval: RetrievalSettings::default(),
             runtime: RuntimeSettings::default(),
             ui: UiSettings::default(),
+            telemetry: TelemetrySettings::default(),
         }
     }
 }
@@ -243,6 +258,12 @@ impl FindexSettings {
                 "runtime.model_profile must be fast, balanced, or quality".to_string(),
             ));
         }
+        if !self.telemetry.enabled {
+            self.telemetry.crash_reports = false;
+            self.telemetry.include_hardware = false;
+            self.telemetry.include_project_metrics = false;
+            self.telemetry.include_source_samples = false;
+        }
         Ok(self)
     }
 }
@@ -273,14 +294,12 @@ pub fn save(
         fs::create_dir_all(parent)?;
     }
     let encoded = serde_json::to_vec_pretty(&settings)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(&encoded)?;
     file.write_all(b"\n")?;
-    file.sync_all()?;
+    file.as_file().sync_all()?;
+    file.persist(&path).map_err(|error| error.error)?;
     Ok(settings)
 }
 

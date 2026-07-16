@@ -120,7 +120,7 @@ fn dispatch_deep_link(app: &AppHandle, url: &tauri::Url) -> Result<(), String> {
         .to_ascii_lowercase();
     if !matches!(
         route.as_str(),
-        "search" | "open" | "symbol" | "graph" | "settings"
+        "search" | "open" | "symbol" | "graph" | "settings" | "auth"
     ) {
         return Err("unsupported Findex deep-link route".to_string());
     }
@@ -438,6 +438,39 @@ fn set_settings(
 }
 
 #[tauri::command]
+async fn auth_login() -> Result<findex_core::auth::UserProfile, String> {
+    findex_core::auth::login()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn auth_status() -> Result<Option<findex_core::auth::UserProfile>, String> {
+    findex_core::auth::current_user().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn auth_logout() -> Result<(), String> {
+    findex_core::auth::logout().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn telemetry_status(
+    state: State<'_, AppState>,
+) -> Result<findex_core::telemetry::TelemetryStatus, String> {
+    let settings = read_settings(&state)?;
+    findex_core::telemetry::status(&state.db_path, &settings).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn telemetry_flush(state: State<'_, AppState>) -> Result<usize, String> {
+    let settings = read_settings(&state)?;
+    findex_core::telemetry::flush(&state.db_path, &settings)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn check_for_update(
     app: AppHandle,
     pending: State<'_, PendingDesktopUpdate>,
@@ -709,18 +742,44 @@ fn main() {
                 storage: Arc::new(Storage::open(&db_path)?),
                 reranker,
                 embedder,
-                settings: Arc::new(RwLock::new(settings)),
+                settings: Arc::new(RwLock::new(settings.clone())),
                 api_url: format!("http://{bind}"),
                 api_token: uuid::Uuid::new_v4().to_string(),
                 quitting: Arc::new(AtomicBool::new(false)),
             };
+            let _ = findex_core::telemetry::record_event(
+                &state.db_path,
+                &settings,
+                Some(&state.storage),
+                "desktop_started",
+                json!({ "surface": "desktop" }),
+            );
+            findex_core::telemetry::install_panic_hook(
+                state.db_path.clone(),
+                state.settings.clone(),
+            );
             let server_state = Arc::new(state.clone());
+            let telemetry_state = state.clone();
             app.manage(state);
             setup_deep_links(app)?;
             setup_tray(app)?;
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = serve_api(server_state, listener).await {
                     eprintln!("Findex dashboard API stopped: {error}");
+                }
+            });
+            tauri::async_runtime::spawn(async move {
+                let settings = telemetry_state
+                    .settings
+                    .read()
+                    .map(|settings| settings.clone())
+                    .unwrap_or_default();
+                if settings.telemetry.enabled {
+                    if let Err(error) =
+                        findex_core::telemetry::flush(&telemetry_state.db_path, &settings).await
+                    {
+                        eprintln!("telemetry queue preserved for retry: {error}");
+                    }
                 }
             });
             Ok(())
@@ -754,6 +813,11 @@ fn main() {
             reindex,
             get_settings,
             set_settings,
+            auth_login,
+            auth_status,
+            auth_logout,
+            telemetry_status,
+            telemetry_flush,
             list_models,
             download_model_profile,
             check_for_update,

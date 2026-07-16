@@ -6,6 +6,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use findex_core::auth::UserProfile;
 use findex_core::graph_query::query_graph;
 use findex_core::intelligence::{graph_snapshot, impact_analysis, GraphSnapshot, ImpactReport};
 use findex_core::runtime::{profile, RuntimeProfile};
@@ -148,6 +149,10 @@ struct UpdateJob {
     receiver: mpsc::Receiver<Result<UpdateJobResult, String>>,
 }
 
+struct AuthJob {
+    receiver: mpsc::Receiver<Result<UserProfile, String>>,
+}
+
 enum UpdateJobResult {
     Checked(UpdateCheck),
     Installed(String),
@@ -175,6 +180,8 @@ pub struct App {
     indexing: Option<IndexingJob>,
     update_job: Option<UpdateJob>,
     available_update: Option<AvailableUpdate>,
+    auth_job: Option<AuthJob>,
+    profile: Option<UserProfile>,
     update_prompt: bool,
     symbols: Vec<Symbol>,
     files: usize,
@@ -234,6 +241,13 @@ impl App {
         let edges = storage.list_edges()?.len();
         let graph = graph_snapshot(&storage, 220)?;
         let settings = findex_core::settings::load_or_default(&db_path);
+        let _ = findex_core::telemetry::record_event(
+            &db_path,
+            &settings,
+            Some(&storage),
+            "tui_started",
+            serde_json::json!({ "surface": "tui" }),
+        );
         let theme_light = match settings.ui.theme {
             findex_core::settings::ThemePreference::Light => true,
             findex_core::settings::ThemePreference::Dark => false,
@@ -261,6 +275,7 @@ impl App {
         let embedder = create_embedder(128);
         findex_core::runtime::start_model_idle_janitor(&embedder, &reranker);
         let update_job = start_update_check();
+        let profile = findex_core::auth::current_user().ok().flatten();
         Ok(Self {
             view: View::Dashboard,
             db_path,
@@ -268,6 +283,8 @@ impl App {
             indexing: None,
             update_job,
             available_update: None,
+            auth_job: None,
+            profile,
             update_prompt: false,
             symbols,
             files,
@@ -348,7 +365,16 @@ impl App {
         let mut last_frame = Instant::now();
         loop {
             terminal.draw(|frame| self.draw(frame))?;
-            if event::poll(Duration::from_millis(80))? {
+            let cadence = if self.indexing.is_some() {
+                Duration::from_millis(40)
+            } else if self.motion && self.view == View::Graph {
+                Duration::from_millis(50)
+            } else if self.motion || self.toast_until.is_some() || self.help.is_open() {
+                Duration::from_millis(80)
+            } else {
+                Duration::from_millis(250)
+            };
+            if event::poll(cadence)? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         if self.handle_key(key, &storage)? {
@@ -374,6 +400,7 @@ impl App {
             self.tick = self.tick.wrapping_add(1);
             self.poll_indexing(&storage)?;
             self.poll_update();
+            self.poll_auth();
             if self
                 .search_dirty_at
                 .is_some_and(|started| started.elapsed() >= Duration::from_millis(180))
@@ -562,6 +589,7 @@ impl App {
                 self.update_prompt = true;
             }
             KeyCode::Char('t') => self.toggle_theme(),
+            KeyCode::Char('a') => self.toggle_auth(),
             _ => {}
         }
         Ok(false)
@@ -788,6 +816,68 @@ impl App {
         }
     }
 
+    fn toggle_auth(&mut self) {
+        if self.auth_job.is_some() {
+            self.message = "sign-in already in progress".to_string();
+            return;
+        }
+        if self.profile.is_some() {
+            match findex_core::auth::logout() {
+                Ok(()) => {
+                    self.profile = None;
+                    self.notify(
+                        "signed out; local indexes were not changed",
+                        ToastType::Info,
+                    );
+                }
+                Err(error) => self.notify(format!("sign-out failed: {error}"), ToastType::Error),
+            }
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let spawn = std::thread::Builder::new()
+            .name("findex-tui-auth".to_string())
+            .spawn(move || {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())
+                    .and_then(|runtime| {
+                        runtime
+                            .block_on(findex_core::auth::login())
+                            .map_err(|error| error.to_string())
+                    });
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.auth_job = Some(AuthJob { receiver });
+                self.notify("complete sign-in in the system browser", ToastType::Info);
+            }
+            Err(error) => self.notify(
+                format!("could not start sign-in: {error}"),
+                ToastType::Error,
+            ),
+        }
+    }
+
+    fn poll_auth(&mut self) {
+        let result = self
+            .auth_job
+            .as_ref()
+            .and_then(|job| job.receiver.try_recv().ok());
+        let Some(result) = result else { return };
+        self.auth_job = None;
+        match result {
+            Ok(profile) => {
+                self.message = format!("signed in as {}", profile.email);
+                self.profile = Some(profile);
+                self.notify(self.message.clone(), ToastType::Success);
+            }
+            Err(error) => self.notify(format!("sign-in failed: {error}"), ToastType::Error),
+        }
+    }
+
     fn refresh_index(&mut self, storage: &Storage) -> anyhow::Result<()> {
         self.symbols = storage.list_symbols()?;
         self.files = storage.list_files()?.len();
@@ -868,18 +958,30 @@ impl App {
     fn inspect_symbol(&mut self, storage: &Storage, symbol: &Symbol) -> anyhow::Result<()> {
         let report = impact_analysis(storage, &symbol.id)?;
         self.inspector = format!(
-            "{} {}\n\n{}\n{}:{}-{}\n\nRISK  {:.1}/100{}\nIN    {}\nOUT   {}\nFILES {}\n\nCALLERS\n{}\n\nCALLEES\n{}",
+            "{} {}\n\n{}\n{}:{}-{}\n\nFINDING\n{} has {} incoming and {} outgoing relationships. {}\n\nEVIDENCE\nRisk {:.1}/100; {} affected files; {} callers; {} callees.\n\nNEXT STEP\n{}\n\nCALLERS\n{}\n\nCALLEES\n{}",
             icon(self.nerd_icons, "󰅩", "@"),
             report.symbol.kind,
             report.symbol.signature,
             report.symbol.file_path,
             report.symbol.start_line,
             report.symbol.end_line,
-            report.risk_score,
-            if report.god_node { "  GOD NODE" } else { "" },
+            report.symbol.name,
             report.incoming_edges,
             report.outgoing_edges,
+            if report.god_node {
+                "Treat edits as elevated risk."
+            } else {
+                "Coupling is within the normal indexed range."
+            },
+            report.risk_score,
             report.affected_files.len(),
+            report.callers.len(),
+            report.callees.len(),
+            if report.god_node {
+                "Review callers and tests before editing; request one bounded graph hop."
+            } else {
+                "Read the exact source range first; expand only if the local contract is insufficient."
+            },
             report
                 .callers
                 .iter()
@@ -991,6 +1093,13 @@ impl App {
                 ),
                 Span::styled("LOCAL CODE GRAPH", Style::default().fg(nord::cyan())),
                 Span::styled(format!(" {pulse} "), Style::default().fg(nord::green())),
+                Span::styled(
+                    self.profile
+                        .as_ref()
+                        .map(|profile| format!("{}  ", profile.display_name))
+                        .unwrap_or_default(),
+                    Style::default().fg(nord::purple()),
+                ),
                 Span::styled(
                     format!(
                         "{} files  {} symbols  {} edges",
@@ -1124,6 +1233,19 @@ impl App {
             0
         };
         crate::ingest_sprite::draw(frame.buffer_mut(), sprite_x, sprite_y, frame_index);
+        let halo = [
+            (sprite_x.saturating_sub(1), sprite_y + 1),
+            (sprite_x + crate::ingest_sprite::WIDTH, sprite_y + 2),
+            (sprite_x.saturating_sub(1), sprite_y + 5),
+            (sprite_x + crate::ingest_sprite::WIDTH, sprite_y + 6),
+        ];
+        for (index, (x, y)) in halo.into_iter().enumerate() {
+            if (self.tick as usize / 2 + index).is_multiple_of(halo.len()) {
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                    cell.set_char('•').set_fg(nord::yellow());
+                }
+            }
+        }
 
         let elapsed = self
             .indexing
@@ -1259,7 +1381,15 @@ impl App {
             .map(|(index, node)| {
                 let ring = 0.25 + 0.68 * ((index % 4 + 1) as f64 / 4.0);
                 let angle = index as f64 / node_count as f64 * TAU * 7.0 + phase;
-                (node.id.as_str(), (ring * angle.cos(), ring * angle.sin()))
+                let depth = (angle * 0.63 + phase * 2.0).sin();
+                let perspective = 0.82 + (depth + 1.0) * 0.11;
+                (
+                    node.id.as_str(),
+                    (
+                        ring * angle.cos() * perspective,
+                        ring * angle.sin() * 0.76 * perspective,
+                    ),
+                )
             })
             .collect();
         let half_span = 1.1 / self.graph_zoom;
@@ -1590,9 +1720,9 @@ impl App {
                 ),
                 Span::styled(
                     if self.available_update.is_some() {
-                        " F8 update  Tab views  t theme  ? help  Ctrl+Q quit "
+                        " F8 update  Tab views  a account  t theme  ? help  Ctrl+Q quit "
                     } else {
-                        " Tab views  t theme  Enter inspect/run  ? help  Ctrl+Q quit "
+                        " Tab views  a account  t theme  Enter inspect/run  ? help  Ctrl+Q quit "
                     },
                     Style::default().fg(nord::border()),
                 ),
@@ -1616,7 +1746,7 @@ impl App {
         if let Some(area) = self.help.inner_area() {
             frame.render_widget(
             Paragraph::new(
-                "1–6 / Tab    switch views\n/             jump to search\nF2            hybrid → lexical → semantic\nF8            review a signed update\nt             toggle persisted light/dark theme\n↑ ↓           select search result\nEnter         inspect result or execute query\nr             reindex (dashboard) or refresh GPU probes (runtime)\n\nGraph view\nj/k           select node\nh/l or ←/→    pan\n+/-           zoom\n[ / ]         whole graph or 1–4 hop neighborhood\ne             cycle typed edge filter\nSpace         pause/resume layout motion\nf             fit graph\nEnter         inspect selected node\n\n?             close this help\nCtrl+Q / Esc  quit\n\nEnvironment\nFINDEX_TUI_MOTION=0      disable motion\nFINDEX_TUI_ICONS=ascii   glyph fallback\nFINDEX_MEMORY_BUDGET_MB  hard policy target\nFINDEX_RAYON_THREADS     worker count",
+                "1–6 / Tab    switch views\n/             jump to search\nF2            hybrid → lexical → semantic\nF8            review a signed update\na             sign in/out using the shared OS vault\nt             toggle persisted light/dark theme\n↑ ↓           select search result\nEnter         inspect result or execute query\nr             reindex (dashboard) or refresh GPU probes (runtime)\n\nGraph view\nj/k           select node\nh/l or ←/→    pan\n+/-           zoom\n[ / ]         whole graph or 1–4 hop neighborhood\ne             cycle typed edge filter\nSpace         pause/resume projected layout motion\nf             fit graph\nEnter         inspect selected node\n\n?             close this help\nCtrl+Q / Esc  quit\n\nEnvironment\nFINDEX_TUI_MOTION=0      disable motion\nFINDEX_TUI_ICONS=ascii   glyph fallback\nFINDEX_MEMORY_BUDGET_MB  hard policy target\nFINDEX_RAYON_THREADS     worker count",
             )
             .style(Style::default().fg(nord::text()))
             .wrap(Wrap { trim: false }),

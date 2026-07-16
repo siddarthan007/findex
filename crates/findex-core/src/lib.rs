@@ -1,5 +1,7 @@
 #![recursion_limit = "512"]
 
+pub mod auth;
+pub mod cancellation;
 pub mod discovery;
 pub mod graph_pruning;
 pub mod graph_query;
@@ -21,6 +23,7 @@ pub mod stack_graphs;
 pub mod storage;
 pub mod structural_locality;
 pub mod taint;
+pub mod telemetry;
 pub mod token_budget;
 pub mod updater;
 pub mod vfs;
@@ -62,6 +65,8 @@ fn vector_quantization() -> Quantization {
 
 #[derive(Error, Debug)]
 pub enum IngestionError {
+    #[error(transparent)]
+    Cancelled(#[from] crate::cancellation::Cancelled),
     #[error("Discovery error: {0}")]
     Discovery(#[from] discovery::DiscoveryError),
     #[error("Storage error: {0}")]
@@ -199,11 +204,13 @@ pub fn build_lexical_index<P: AsRef<Path>>(
     db_dir: P,
     storage: &Storage,
 ) -> Result<(), IngestionError> {
+    crate::cancellation::checkpoint()?;
     let documents = stored_retrieval_documents(storage)?;
     let (symbols, bodies): (Vec<_>, Vec<_>) = documents.into_iter().unzip();
 
     let index = LexicalIndex::open_or_create(db_dir.as_ref().join("lexical"))?;
     index.index_symbols(&symbols, &bodies)?;
+    crate::cancellation::checkpoint()?;
     Ok(())
 }
 
@@ -214,6 +221,7 @@ pub fn build_vector_index_with_embedder<P: AsRef<Path>>(
     storage: &Storage,
     embedder: &dyn crate::search::vector::Embedder,
 ) -> Result<(), IngestionError> {
+    crate::cancellation::checkpoint()?;
     let db_path = db_dir.as_ref();
     let retrieval_documents = stored_retrieval_documents(storage)?;
 
@@ -231,6 +239,7 @@ pub fn build_vector_index_with_embedder<P: AsRef<Path>>(
         .map(|(symbol, body)| (symbol.id.as_str(), body.as_str()))
         .collect();
     vector_index.add_symbols_batch(&documents, embedder)?;
+    crate::cancellation::checkpoint()?;
     vector_index.save()?;
     Ok(())
 }
@@ -241,12 +250,14 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     storage: &Storage,
     options: IngestionOptions,
 ) -> Result<IngestionStats, IngestionError> {
+    crate::cancellation::checkpoint()?;
     let start_time = Instant::now();
     let root = root_dir.as_ref();
     let db_path = db_dir.as_ref();
 
     // 1. Discover all files on disk
     let discovered = discover_files(root)?;
+    crate::cancellation::checkpoint()?;
     let total_files = discovered.len();
 
     // 2. Compare the repository Merkle roots. The recursive comparison stops
@@ -275,6 +286,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     let mut symbols_by_file: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
     for sym in &existing_symbols {
+        crate::cancellation::checkpoint()?;
         symbols_by_file
             .entry(sym.file_path.clone())
             .or_default()
@@ -292,6 +304,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     // Check for added or modified files. Legacy databases without a snapshot
     // fall back to the leaf hash comparison for the one migration run.
     for file in &discovered {
+        crate::cancellation::checkpoint()?;
         current_paths.insert(file.path.clone());
         if requires_format_migration {
             to_parse.push(file.clone());
@@ -341,9 +354,11 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     }
 
     // 3. Parse changed files in parallel using Rayon
+    let cancellation = crate::cancellation::inherited_token();
     let parse_results: Vec<ParseResult> = to_parse
         .into_par_iter()
         .map(|file_info| {
+            crate::cancellation::checkpoint_token(cancellation.as_ref())?;
             // Memory-map the file and borrow its contents as &str for zero-copy parsing.
             // The Mmap is kept alive for the duration of this closure so that AST nodes
             // and symbol bodies can reference the source text.
@@ -376,6 +391,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
             let mut bodies = Vec::new();
             if options.build_lexical_index || options.build_vector_index {
                 for sym in &symbols {
+                    crate::cancellation::checkpoint_token(cancellation.as_ref())?;
                     bodies.push(extract_symbol_body(
                         content_ref,
                         sym.start_line,
@@ -397,6 +413,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     let mut files_to_save = Vec::new();
 
     for res in parse_results {
+        crate::cancellation::checkpoint()?;
         let (file_info, symbols, edges, bodies, line_count) = res?;
         total_bytes += file_info.size;
         total_lines += line_count;
@@ -412,6 +429,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
         // Split large symbols at code-shaped boundaries and index/store chunks.
         let mut file_chunks = Vec::new();
         for (sym, body) in symbols.iter().zip(bodies.iter()) {
+            crate::cancellation::checkpoint()?;
             for chunk in chunk_symbol(sym, body, 256) {
                 let mut document = sym.clone();
                 document.id = chunk.id.clone();
@@ -431,6 +449,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
 
     // Collect symbol IDs from deleted files and remove their file records.
     for path in indexed_map.keys() {
+        crate::cancellation::checkpoint()?;
         if !current_paths.contains(path) {
             let path_str = path.to_string_lossy().to_string();
             if let Some(old_ids) = symbols_by_file.remove(&path_str) {
@@ -442,6 +461,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
 
     // Persist file records, symbols, and edges in batches.
     for file_info in files_to_save {
+        crate::cancellation::checkpoint()?;
         // Remove the previous primary records and their outgoing/containment
         // edges before writing the new parse. Merely deleting search-index
         // documents leaves stale symbols behind when line-based IDs change.
@@ -451,6 +471,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
     storage.save_symbols_batch(&new_symbols)?;
     storage.save_chunks_batch(&new_chunks)?;
     storage.save_edges_batch(&new_edges)?;
+    crate::cancellation::checkpoint()?;
 
     // 5. Incrementally update Tantivy and USearch indexes.
     if options.build_lexical_index {
@@ -475,6 +496,7 @@ pub fn ingest_codebase_with_options<P: AsRef<Path>, D: AsRef<Path>>(
         )?;
         vector_index.save()?;
     }
+    crate::cancellation::checkpoint()?;
 
     #[cfg(feature = "stack-graphs")]
     let stack_graph_edges = if options.resolve_stack_graphs {
@@ -563,6 +585,7 @@ fn stored_retrieval_documents(storage: &Storage) -> Result<Vec<(Symbol, String)>
     if !chunks.is_empty() {
         let mut documents = Vec::with_capacity(chunks.len());
         for chunk in chunks {
+            crate::cancellation::checkpoint()?;
             if let Some(parent) = storage.get_symbol(&chunk.parent_symbol_id)? {
                 let mut document = parent.clone();
                 document.id = chunk.id;
@@ -580,6 +603,7 @@ fn stored_retrieval_documents(storage: &Storage) -> Result<Vec<(Symbol, String)>
     let symbols = storage.list_symbols()?;
     let mut documents = Vec::with_capacity(symbols.len());
     for symbol in symbols {
+        crate::cancellation::checkpoint()?;
         let path = Path::new(&symbol.file_path);
         let body = if path.exists() {
             let file = File::open(path)?;
@@ -657,6 +681,7 @@ pub fn search_codebase<P: AsRef<Path>>(
     reranker: Option<&dyn search::rerank::Reranker>,
     limit: usize,
 ) -> Result<Vec<(Symbol, f32)>, IngestionError> {
+    crate::cancellation::checkpoint()?;
     let embedder = create_embedder(128);
     search_codebase_with_components(
         db_dir,
@@ -828,7 +853,9 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
     }
     .clamp(1, 200);
 
+    let cancellation = crate::cancellation::inherited_token();
     let lexical_rankings = || -> Result<(Vec<String>, Vec<String>), IngestionError> {
+        crate::cancellation::checkpoint_token(cancellation.as_ref())?;
         let lexical_index = ensure_lexical_index(db_path, storage)?;
         let expanded_query = if intent.lexical_query.is_empty() {
             intent.raw.as_str()
@@ -836,6 +863,7 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
             intent.lexical_query.as_str()
         };
         let expanded = lexical_index.search(expanded_query, stage1_limit)?;
+        crate::cancellation::checkpoint_token(cancellation.as_ref())?;
         let raw = if intent.raw == expanded_query {
             expanded.clone()
         } else {
@@ -855,16 +883,22 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
             rrf_merge_rankings(&[&raw, &expanded], stage1_limit)
         }
         "semantic" => {
+            crate::cancellation::checkpoint()?;
             let vector_index = ensure_vector_index(db_path, storage, embedder)?;
-            vector_index.search(query, stage1_limit, embedder)?
+            let results = vector_index.search(query, stage1_limit, embedder)?;
+            crate::cancellation::checkpoint()?;
+            results
         }
         _ => {
             // The two independent retrieval legs run concurrently. This keeps
             // semantic inference from serializing the Tantivy lookup.
             let (lex_results, vec_results) =
                 rayon::join(lexical_rankings, || -> Result<_, IngestionError> {
+                    crate::cancellation::checkpoint_token(cancellation.as_ref())?;
                     let vector_index = ensure_vector_index(db_path, storage, embedder)?;
-                    Ok(vector_index.search(query, stage1_limit, embedder)?)
+                    let results = vector_index.search(query, stage1_limit, embedder)?;
+                    crate::cancellation::checkpoint_token(cancellation.as_ref())?;
+                    Ok(results)
                 });
             let (raw_lex_ids, expanded_lex_ids) = lex_results?;
             let vec_results = vec_results?;
@@ -878,6 +912,7 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
     let mut candidates_by_symbol: std::collections::HashMap<String, (Symbol, f32)> =
         std::collections::HashMap::new();
     for (id, score) in ranked_ids {
+        crate::cancellation::checkpoint()?;
         if let Some(sym) = storage.get_symbol(&id)? {
             candidates_by_symbol
                 .entry(sym.id.clone())
@@ -903,6 +938,7 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
 
     // Stage 2: Rerank
     let results = if let Some(r) = reranker {
+        crate::cancellation::checkpoint()?;
         r.rerank(query, &candidates)?
     } else {
         candidates
@@ -921,6 +957,7 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
 
     if options.graph_expansion && options.graph_hops > 0 {
         for (seed, score) in results.iter().take(5) {
+            crate::cancellation::checkpoint()?;
             for related in crate::resolver::expand_context_ranked(
                 &seed.id,
                 options.graph_hops,
@@ -943,6 +980,7 @@ pub fn search_codebase_with_options<P: AsRef<Path>>(
 
     let mut expanded: Vec<(Symbol, f32)> = expanded_by_id.into_values().collect();
     for (symbol, score) in &mut expanded {
+        crate::cancellation::checkpoint()?;
         let evidence =
             crate::search::query_intent::relation_evidence_boost(storage, symbol, &intent)?;
         *score *= 1.0 + evidence;
@@ -981,6 +1019,8 @@ pub fn get_codebase_skeleton(
     let symbols = storage.list_symbols()?;
     let edges = storage.list_edges()?;
 
+    crate::cancellation::checkpoint()?;
+
     let pageranks = compute_pagerank(&symbols, &edges);
     let skeleton = generate_skeleton(&symbols, &pageranks, token_budget);
 
@@ -995,6 +1035,7 @@ pub fn get_codebase_skeleton_with_personalization(
 ) -> Result<String, IngestionError> {
     let symbols = storage.list_symbols()?;
     let edges = storage.list_edges()?;
+    crate::cancellation::checkpoint()?;
     let pageranks = compute_personalized_pagerank(&symbols, &edges, personalization);
     Ok(generate_skeleton(&symbols, &pageranks, token_budget))
 }
@@ -1042,6 +1083,7 @@ pub fn semantic_diff_files<P: AsRef<Path>, Q: AsRef<Path>>(
     })?;
     let old_code = std::fs::read_to_string(old_path)?;
     let new_code = std::fs::read_to_string(new_path)?;
+    crate::cancellation::checkpoint()?;
     Ok(crate::semantic_diff::diff_code(
         &old_code,
         &new_code,

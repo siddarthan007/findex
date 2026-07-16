@@ -1,0 +1,8 @@
+attribute definition = node => type = "pop_symbol", symbol = (source-text node), source_node = node, is_definition
+global ROOT_NODE
+
+[(rule_set (selectors)@name) (at_rule (at_keyword)@name)] {
+  node symbol
+  attr (symbol) definition = @name
+  edge ROOT_NODE -> symbol
+}

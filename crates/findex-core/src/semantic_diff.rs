@@ -82,6 +82,9 @@ fn parse(code: &str, language: &Language) -> Result<tree_sitter::Tree, ParserErr
 }
 
 fn diff_nodes(a: Node, b: Node, old: &[u8], new: &[u8]) -> SemanticDiff {
+    if crate::cancellation::is_cancelled() {
+        return cancelled_diff();
+    }
     let label_a = a.kind();
     let label_b = b.kind();
 
@@ -175,6 +178,9 @@ fn diff_children(a: Node, b: Node, old: &[u8], new: &[u8]) -> SemanticDiff {
     let mut ops = vec![Op::None; (m + 1) * columns];
 
     for i in 1..=m {
+        if i % 32 == 0 && crate::cancellation::is_cancelled() {
+            return cancelled_diff();
+        }
         dp[i * columns] = i as f32;
         ops[i * columns] = Op::Delete;
     }
@@ -218,6 +224,9 @@ fn diff_children(a: Node, b: Node, old: &[u8], new: &[u8]) -> SemanticDiff {
     let mut i = m;
     let mut j = n;
     while i > 0 || j > 0 {
+        if (i + j).is_multiple_of(32) && crate::cancellation::is_cancelled() {
+            return cancelled_diff();
+        }
         match ops[i * columns + j] {
             Op::Match(ai, bj) => {
                 let sub = diff_nodes(a_children[ai], b_children[bj], old, new);
@@ -302,6 +311,9 @@ fn diff_children_keyed(
     let mut bounded_alignment = true;
 
     for old_node in old_children.iter().copied() {
+        if crate::cancellation::is_cancelled() {
+            return cancelled_diff();
+        }
         let matched = new_by_key
             .get_mut(&node_key(old_node, old))
             .and_then(VecDeque::pop_front);
@@ -338,6 +350,15 @@ fn diff_children_keyed(
         changes,
         bounded_alignment,
         changes_truncated,
+    }
+}
+
+fn cancelled_diff() -> SemanticDiff {
+    SemanticDiff {
+        distance: 0.0,
+        changes: Vec::new(),
+        bounded_alignment: true,
+        changes_truncated: true,
     }
 }
 

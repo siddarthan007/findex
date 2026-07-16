@@ -1,7 +1,9 @@
 //! Precise cross-file name resolution using GitHub Stack Graphs.
 //!
-//! Python, JavaScript, TypeScript/TSX and Java use their published TSG rule
-//! packages. Other languages retain Findex's fast heuristic resolver.
+//! Python, JavaScript, TypeScript/TSX and Java use published TSG packages.
+//! Rust, C/C++, Dart, Go, HTML and CSS use bundled, validated lexical TSG
+//! rules alongside Findex's typed heuristic edges; their narrower guarantees
+//! are reported separately instead of being described as full resolution.
 
 #[cfg(feature = "stack-graphs")]
 mod enabled {
@@ -12,13 +14,14 @@ mod enabled {
     use stack_graphs::stitching::{
         ForwardPartialPathStitcher, GraphEdgeCandidates, StitcherConfig,
     };
-    use stack_graphs::CancelAfterDuration as StitchCancellation;
+    use stack_graphs::CancellationFlag as StitchCancellationFlag;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tree_sitter_stack_graphs::loader::LanguageConfiguration;
     use tree_sitter_stack_graphs::{
-        CancelAfterDuration, NoCancellation, Variables, FILE_PATH_VAR, ROOT_PATH_VAR,
+        CancellationFlag as BuildCancellationFlag, NoCancellation, Variables, FILE_PATH_VAR,
+        ROOT_PATH_VAR,
     };
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -28,6 +31,10 @@ mod enabled {
         pub graph_nodes: usize,
         pub resolved_edges: usize,
         pub skipped_files: usize,
+        #[serde(default)]
+        pub published_rule_files: usize,
+        #[serde(default)]
+        pub bundled_rule_files: usize,
         pub timed_out: bool,
         pub message: String,
     }
@@ -40,6 +47,78 @@ mod enabled {
         target_file: String,
         target_line: usize,
         target_symbol: String,
+    }
+
+    struct CooperativeCancellation {
+        started: Instant,
+        timeout: Duration,
+        task: Option<crate::cancellation::CancellationToken>,
+    }
+
+    impl CooperativeCancellation {
+        fn new(timeout: Duration) -> Self {
+            Self {
+                started: Instant::now(),
+                timeout,
+                task: crate::cancellation::inherited_token(),
+            }
+        }
+
+        fn cancelled(&self) -> bool {
+            self.started.elapsed() > self.timeout
+                || self
+                    .task
+                    .as_ref()
+                    .is_some_and(crate::cancellation::CancellationToken::is_cancelled)
+        }
+    }
+
+    impl BuildCancellationFlag for CooperativeCancellation {
+        fn check(
+            &self,
+            at: &'static str,
+        ) -> Result<(), tree_sitter_stack_graphs::CancellationError> {
+            if self.cancelled() {
+                Err(tree_sitter_stack_graphs::CancellationError(at))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl StitchCancellationFlag for CooperativeCancellation {
+        fn check(&self, at: &'static str) -> Result<(), stack_graphs::CancellationError> {
+            if self.cancelled() {
+                Err(stack_graphs::CancellationError(at))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn bundled_configuration(
+        extension: &str,
+        scope: &str,
+        file_types: &[&str],
+        source: &'static str,
+    ) -> Result<LanguageConfiguration, String> {
+        let parser = crate::parser::registry::config_for_extension(extension)
+            .ok_or_else(|| format!("missing parser for bundled {extension} TSG rules"))?;
+        LanguageConfiguration::from_sources(
+            parser.language.clone(),
+            Some(scope.to_string()),
+            None,
+            file_types
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            PathBuf::from(format!("findex://tsg/{extension}")),
+            source,
+            None,
+            None,
+            &NoCancellation,
+        )
+        .map_err(|error| error.to_string())
     }
 
     fn configurations(files: &[PathBuf]) -> Result<Vec<LanguageConfiguration>, String> {
@@ -87,13 +166,100 @@ mod enabled {
                     .map_err(|error| error.to_string())?,
             );
         }
+        if extensions.contains("rs") {
+            configurations.push(bundled_configuration(
+                "rs",
+                "source.rust",
+                &["rs"],
+                include_str!("../tsg/rust.tsg"),
+            )?);
+        }
+        if extensions
+            .iter()
+            .any(|extension| matches!(*extension, "c" | "h"))
+        {
+            configurations.push(bundled_configuration(
+                "c",
+                "source.c",
+                &["c", "h"],
+                include_str!("../tsg/c.tsg"),
+            )?);
+        }
+        if extensions
+            .iter()
+            .any(|extension| matches!(*extension, "cc" | "cpp" | "cxx" | "hpp" | "hxx"))
+        {
+            configurations.push(bundled_configuration(
+                "cpp",
+                "source.cpp",
+                &["cc", "cpp", "cxx", "hpp", "hxx"],
+                include_str!("../tsg/cpp.tsg"),
+            )?);
+        }
+        if extensions.contains("dart") {
+            configurations.push(bundled_configuration(
+                "dart",
+                "source.dart",
+                &["dart"],
+                include_str!("../tsg/dart.tsg"),
+            )?);
+        }
+        if extensions.contains("go") {
+            configurations.push(bundled_configuration(
+                "go",
+                "source.go",
+                &["go"],
+                include_str!("../tsg/go.tsg"),
+            )?);
+        }
+        if extensions
+            .iter()
+            .any(|extension| matches!(*extension, "html" | "htm"))
+        {
+            configurations.push(bundled_configuration(
+                "html",
+                "text.html.basic",
+                &["html", "htm"],
+                include_str!("../tsg/html.tsg"),
+            )?);
+        }
+        if extensions.contains("css") {
+            configurations.push(bundled_configuration(
+                "css",
+                "source.css",
+                &["css"],
+                include_str!("../tsg/css.tsg"),
+            )?);
+        }
         Ok(configurations)
     }
 
     fn supported(path: &Path) -> bool {
         matches!(
             path.extension().and_then(|extension| extension.to_str()),
-            Some("py" | "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "tsx" | "java")
+            Some(
+                "py" | "js"
+                    | "mjs"
+                    | "cjs"
+                    | "ts"
+                    | "mts"
+                    | "cts"
+                    | "tsx"
+                    | "java"
+                    | "rs"
+                    | "c"
+                    | "h"
+                    | "cc"
+                    | "cpp"
+                    | "cxx"
+                    | "hpp"
+                    | "hxx"
+                    | "dart"
+                    | "go"
+                    | "html"
+                    | "htm"
+                    | "css"
+            )
         )
     }
 
@@ -108,6 +274,7 @@ mod enabled {
         let mut skipped = 0;
 
         for path in files {
+            crate::cancellation::checkpoint().map_err(|error| error.to_string())?;
             let Some(configuration) = configurations.iter().find(|configuration| {
                 path.extension()
                     .and_then(|extension| extension.to_str())
@@ -138,7 +305,7 @@ mod enabled {
             globals
                 .add(ROOT_PATH_VAR.into(), root_string.as_str().into())
                 .map_err(|_| "duplicate ROOT_PATH stack-graph variable".to_string())?;
-            let cancellation = CancelAfterDuration::new(Duration::from_millis(per_file_ms));
+            let cancellation = CooperativeCancellation::new(Duration::from_millis(per_file_ms));
             if configuration
                 .sgl
                 .build_stack_graph_into(&mut graph, file, &source, &globals, &cancellation)
@@ -162,7 +329,7 @@ mod enabled {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(2_000)
             .clamp(50, 60_000);
-        let cancellation = StitchCancellation::new(Duration::from_millis(timeout_ms));
+        let cancellation = CooperativeCancellation::new(Duration::from_millis(timeout_ms));
         let result = ForwardPartialPathStitcher::find_all_complete_partial_paths(
             &mut GraphEdgeCandidates::new(graph, &mut partials, None),
             references,
@@ -249,11 +416,24 @@ mod enabled {
             .filter(|path| supported(path))
             .take(max_files + 1)
             .collect();
+        let is_published = |path: &Path| {
+            matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("py" | "js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "tsx" | "java")
+            )
+        };
+        let published_rule_files = supported_files
+            .iter()
+            .filter(|path| is_published(path))
+            .count();
+        let bundled_rule_files = supported_files.len().saturating_sub(published_rule_files);
         if supported_files.len() > max_files {
             return Ok(StackGraphStats {
                 enabled: true,
                 supported_files: supported_files.len(),
                 skipped_files: supported_files.len(),
+                published_rule_files,
+                bundled_rule_files,
                 message: format!(
                     "skipped: supported file count exceeds FINDEX_STACK_GRAPH_MAX_FILES={max_files}"
                 ),
@@ -264,9 +444,11 @@ mod enabled {
         let (graph, skipped_files) = build_graph(root, &supported_files)?;
         let graph_nodes = graph.iter_nodes().count();
         let (resolved, timed_out) = resolve_graph(&graph);
+        crate::cancellation::checkpoint().map_err(|error| error.to_string())?;
         let symbols = storage.list_symbols().map_err(|error| error.to_string())?;
         let mut by_file: HashMap<String, Vec<&Symbol>> = HashMap::new();
         for symbol in &symbols {
+            crate::cancellation::checkpoint().map_err(|error| error.to_string())?;
             by_file
                 .entry(symbol.file_path.clone())
                 .or_default()
@@ -274,6 +456,7 @@ mod enabled {
         }
         let mut edges = Vec::new();
         for resolution in resolved {
+            crate::cancellation::checkpoint().map_err(|error| error.to_string())?;
             let source = nearest_symbol(
                 &by_file,
                 &resolution.source_file,
@@ -288,11 +471,20 @@ mod enabled {
             );
             if let (Some(source), Some(target)) = (source, target) {
                 if source.id != target.id {
+                    let mut tags = vec!["stack-graphs".to_string()];
+                    tags.push(
+                        if is_published(Path::new(&resolution.source_file)) {
+                            "stack-graphs-published"
+                        } else {
+                            "stack-graphs-bundled"
+                        }
+                        .to_string(),
+                    );
                     edges.push(Edge {
                         src: source.id.clone(),
                         dst: target.id.clone(),
                         edge_type: EdgeType::References,
-                        tags: vec!["stack-graphs".to_string()],
+                        tags,
                         ..Default::default()
                     });
                 }
@@ -312,14 +504,35 @@ mod enabled {
             graph_nodes,
             resolved_edges: edges.len(),
             skipped_files,
+            published_rule_files,
+            bundled_rule_files,
             timed_out,
             message: if timed_out {
-                "resolution hit the bounded query timeout; partial exact edges were saved"
-                    .to_string()
+                format!("resolution hit the bounded query timeout; partial edges saved ({published_rule_files} published-rule files, {bundled_rule_files} bundled lexical-rule files)")
             } else {
-                "exact stack-graph reference edges saved".to_string()
+                format!("stack-graph edges saved ({published_rule_files} published-rule files, {bundled_rule_files} bundled lexical-rule files)")
             },
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn bundled_language_rules_compile_against_registered_grammars() {
+            let files = ["rs", "c", "cpp", "dart", "go", "html", "css"]
+                .into_iter()
+                .map(|extension| PathBuf::from(format!("sample.{extension}")))
+                .collect::<Vec<_>>();
+            let configurations = configurations(&files).unwrap();
+            for extension in ["rs", "c", "cpp", "dart", "go", "html", "css"] {
+                assert!(configurations.iter().any(|configuration| configuration
+                    .file_types
+                    .iter()
+                    .any(|file_type| file_type == extension)));
+            }
+        }
     }
 }
 

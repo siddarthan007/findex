@@ -26,6 +26,56 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+const MAX_STDIO_REQUEST_BYTES: usize = 1024 * 1024;
+const DEFAULT_FILE_PAGE_SIZE: usize = 500;
+const MAX_FILE_PAGE_SIZE: usize = 5_000;
+const RESOURCE_PAGE_SIZE: usize = 500;
+const MAX_TREE_RESOURCE_BYTES: usize = 4 * 1024 * 1024;
+
+enum BoundedLine {
+    Eof,
+    Line(Vec<u8>),
+    TooLarge,
+}
+
+fn read_bounded_line<R: BufRead>(reader: &mut R) -> io::Result<BoundedLine> {
+    let mut line = Vec::with_capacity(8 * 1024);
+    let mut oversized = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if oversized {
+                Ok(BoundedLine::TooLarge)
+            } else if line.is_empty() {
+                Ok(BoundedLine::Eof)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        if !oversized {
+            if line.len().saturating_add(consumed) > MAX_STDIO_REQUEST_BYTES {
+                oversized = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&available[..consumed]);
+            }
+        }
+        reader.consume(consumed);
+
+        if newline.is_some() {
+            return if oversized {
+                Ok(BoundedLine::TooLarge)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+    }
+}
+
 fn response_mode(args: &Value) -> &str {
     match args.get("response_mode").and_then(Value::as_str) {
         Some("compact") => "compact",
@@ -104,15 +154,35 @@ impl McpServer {
     pub fn run(&self) -> Result<(), McpError> {
         let stdin = io::stdin();
         let mut stdout = io::stdout().lock();
-        let reader = stdin.lock();
+        let mut reader = stdin.lock();
 
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
+        loop {
+            let mut line = match read_bounded_line(&mut reader)? {
+                BoundedLine::Eof => break,
+                BoundedLine::TooLarge => {
+                    let response = json!({
+                        "jsonrpc": "2.0",
+                        "id": Value::Null,
+                        "error": {
+                            "code": -32600,
+                            "message": format!(
+                                "Request exceeds the {MAX_STDIO_REQUEST_BYTES}-byte stdio limit"
+                            )
+                        }
+                    });
+                    Self::send(&mut stdout, &response)?;
+                    continue;
+                }
+                BoundedLine::Line(line) => line,
+            };
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
 
-            let request: JsonRpcRequest = match serde_json::from_str(&line) {
+            let request: JsonRpcRequest = match serde_json::from_slice(&line) {
                 Ok(req) => req,
                 Err(e) => {
                     let response = json!({
@@ -229,7 +299,7 @@ impl McpServer {
     /// MCP resources: read-only, URI-addressed data that agents can fetch on demand
     /// rather than having it inlined into every tool result.
     fn handle_resources_list(&self, request: &JsonRpcRequest) -> Value {
-        let files = match self.storage.list_files() {
+        let mut files = match self.storage.list_files() {
             Ok(files) => files,
             Err(_) => {
                 return Self::error_response(
@@ -240,42 +310,65 @@ impl McpServer {
             }
         };
 
-        // Always-present synthetic resources.
-        let mut resources = vec![
-            json!({
-                "uri": "findex://repo/map",
-                "name": "Repo Map (1k token skeleton)",
-                "description": "Personalized-PageRank elided codebase skeleton. Fetch for high-level orientation.",
-                "mimeType": "text/plain"
-            }),
-            json!({
-                "uri": "findex://tree",
-                "name": "File Tree",
-                "description": "All indexed files with sizes.",
-                "mimeType": "text/plain"
-            }),
-            json!({
-                "uri": "findex://stats",
-                "name": "Index Statistics",
-                "description": "Symbol/edge/vector counts.",
-                "mimeType": "application/json"
-            }),
-            json!({
-                "uri": "findex://architecture",
-                "name": "Architecture Overview",
-                "description": "Source-free language, layer, contract, entrypoint, hub, and coupling digest.",
-                "mimeType": "application/json"
-            }),
-            json!({
-                "uri": "findex://settings",
-                "name": "Effective Settings",
-                "description": "Current indexing, retrieval, compute, memory, and UI gates.",
-                "mimeType": "application/json"
-            }),
-        ];
+        let cursor = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("cursor"))
+            .and_then(Value::as_str)
+            .unwrap_or("0")
+            .parse::<usize>();
+        let cursor = match cursor {
+            Ok(cursor) if cursor <= files.len() => cursor,
+            _ => {
+                return Self::error_response(
+                    request.id.clone(),
+                    -32602,
+                    "invalid resources cursor".to_string(),
+                )
+            }
+        };
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+
+        // Synthetic resources are returned once on the first page.
+        let mut resources = if cursor == 0 {
+            vec![
+                json!({
+                    "uri": "findex://repo/map",
+                    "name": "Repo Map (1k token skeleton)",
+                    "description": "Personalized-PageRank elided codebase skeleton. Fetch for high-level orientation.",
+                    "mimeType": "text/plain"
+                }),
+                json!({
+                    "uri": "findex://tree",
+                    "name": "File Tree",
+                    "description": "All indexed files with sizes.",
+                    "mimeType": "text/plain"
+                }),
+                json!({
+                    "uri": "findex://stats",
+                    "name": "Index Statistics",
+                    "description": "Symbol/edge/vector counts.",
+                    "mimeType": "application/json"
+                }),
+                json!({
+                    "uri": "findex://architecture",
+                    "name": "Architecture Overview",
+                    "description": "Source-free language, layer, contract, entrypoint, hub, and coupling digest.",
+                    "mimeType": "application/json"
+                }),
+                json!({
+                    "uri": "findex://settings",
+                    "name": "Effective Settings",
+                    "description": "Current indexing, retrieval, compute, memory, and UI gates.",
+                    "mimeType": "application/json"
+                }),
+            ]
+        } else {
+            Vec::new()
+        };
 
         // One resource per indexed file so an agent can pull a skeleton on demand.
-        for f in files.iter().take(2000) {
+        for f in files.iter().skip(cursor).take(RESOURCE_PAGE_SIZE) {
             let uri = format!("findex://file/{}", url_encode(&f.path.to_string_lossy()));
             resources.push(json!({
                 "uri": uri,
@@ -285,10 +378,12 @@ impl McpServer {
             }));
         }
 
+        let next_cursor = cursor.saturating_add(RESOURCE_PAGE_SIZE);
+        let next_cursor = (next_cursor < files.len()).then(|| next_cursor.to_string());
         json!({
             "jsonrpc": "2.0",
             "id": request.id,
-            "result": { "resources": resources }
+            "result": { "resources": resources, "nextCursor": next_cursor }
         })
     }
 
@@ -307,10 +402,20 @@ impl McpServer {
             },
             "findex://tree" => {
                 let mut out = String::new();
-                if let Ok(files) = self.storage.list_files() {
+                let mut truncated = false;
+                if let Ok(mut files) = self.storage.list_files() {
+                    files.sort_by(|left, right| left.path.cmp(&right.path));
                     for f in files {
-                        out.push_str(&format!("{}\t{}B\n", f.path.to_string_lossy(), f.size));
+                        let row = format!("{}\t{}B\n", f.path.to_string_lossy(), f.size);
+                        if out.len().saturating_add(row.len()) > MAX_TREE_RESOURCE_BYTES {
+                            truncated = true;
+                            break;
+                        }
+                        out.push_str(&row);
                     }
+                }
+                if truncated {
+                    out.push_str("\n[truncated: use list_files with offset pagination]\n");
                 }
                 ("text/plain", out)
             }
@@ -595,7 +700,7 @@ impl McpServer {
                     },
                     {
                         "name": "graph_query",
-                        "description": "Run a Cypher-like query on the code graph (e.g. MATCH (a)-[:Calls]->(b) WHERE a.name = 'main' RETURN a, b).",
+                        "description": "Run a bounded Cypher-like graph query. Supports typed directed edges, AND, exact/CONTAINS/STARTS WITH/ENDS WITH comparisons, validated aliases and LIMIT (max 10000).",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -736,8 +841,14 @@ impl McpServer {
                     },
                     {
                         "name": "list_files",
-                        "description": "List indexed files and their byte sizes.",
-                        "inputSchema": { "type": "object", "properties": {} }
+                        "description": "List indexed files and their byte sizes with deterministic offset pagination.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "offset": { "type": "integer", "minimum": 0, "default": 0 },
+                                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 500 }
+                            }
+                        }
                     },
                     {
                         "name": "get_stats",
@@ -969,7 +1080,7 @@ impl McpServer {
             "vfs_update" => self.tool_vfs_update(args),
             "micro_compile" => self.tool_micro_compile(args),
             "pin_execution_trace" => self.tool_pin_execution_trace(args),
-            "list_files" => self.tool_list_files(),
+            "list_files" => self.tool_list_files(args),
             "get_stats" => self.tool_get_stats(),
             "get_context_bundle" => self.tool_get_context_bundle(args),
             "fetch_context" => self.tool_get_context_bundle(args),
@@ -1056,13 +1167,21 @@ impl McpServer {
             Err(error) => return Self::error_response(request.id.clone(), -32603, error),
         };
         let task_id = task.task_id.clone();
+        let token = self.tasks.token(&task_id).unwrap_or_default();
         let server = self.clone();
         let tool_name = name.to_string();
         std::thread::Builder::new()
             .name(format!("findex-task-{}", &task_id[..8]))
             .spawn(move || {
                 let started = std::time::Instant::now();
-                let execution = server.execute_tool(&tool_name, &args);
+                let execution = crate::cancellation::with_token(token, || {
+                    crate::cancellation::checkpoint()
+                        .map_err(|error| McpError::InvalidRequest(error.to_string()))?;
+                    let result = server.execute_tool(&tool_name, &args);
+                    crate::cancellation::checkpoint()
+                        .map_err(|error| McpError::InvalidRequest(error.to_string()))?;
+                    result
+                });
                 let elapsed = started.elapsed().as_millis();
                 let (mut result, failed) = match execution {
                     Ok(content) => (
@@ -1516,8 +1635,38 @@ impl McpServer {
         )?)?)
     }
 
-    fn tool_list_files(&self) -> Result<String, McpError> {
-        Ok(serde_json::to_string_pretty(&self.storage.list_files()?)?)
+    fn tool_list_files(&self, args: &Value) -> Result<String, McpError> {
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        let offset = usize::try_from(offset).map_err(|_| {
+            McpError::InvalidRequest("offset exceeds this platform's address space".to_string())
+        })?;
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(DEFAULT_FILE_PAGE_SIZE as u64)
+            .clamp(1, MAX_FILE_PAGE_SIZE as u64) as usize;
+        let mut files = self.storage.list_files()?;
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let total = files.len();
+        if offset > total {
+            return Err(McpError::InvalidRequest(format!(
+                "offset {offset} exceeds file count {total}"
+            )));
+        }
+        let page: Vec<_> = files.into_iter().skip(offset).take(limit).collect();
+        let returned = page.len();
+        let next_offset = offset
+            .saturating_add(returned)
+            .lt(&total)
+            .then_some(offset.saturating_add(returned));
+        Ok(serde_json::to_string_pretty(&json!({
+            "files": page,
+            "total": total,
+            "offset": offset,
+            "returned": returned,
+            "next_offset": next_offset,
+            "truncated": next_offset.is_some()
+        }))?)
     }
 
     fn tool_find_files(&self, args: &Value) -> Result<String, McpError> {
@@ -1957,6 +2106,42 @@ mod tests {
             let dec = url_decode(&enc);
             assert_eq!(&dec, s, "roundtrip failed for {}", s);
         }
+    }
+
+    #[test]
+    fn stdio_lines_are_bounded_and_recover_after_oversized_input() {
+        let mut input = vec![b'x'; MAX_STDIO_REQUEST_BYTES + 1];
+        input.extend_from_slice(b"\n{}\n");
+        let mut cursor = std::io::Cursor::new(input);
+        assert!(matches!(
+            read_bounded_line(&mut cursor).unwrap(),
+            BoundedLine::TooLarge
+        ));
+        match read_bounded_line(&mut cursor).unwrap() {
+            BoundedLine::Line(line) => assert_eq!(line, b"{}\n"),
+            _ => panic!("expected the next request after draining the oversized line"),
+        }
+    }
+
+    #[test]
+    fn list_files_is_deterministic_and_paginated() {
+        let (_directory, server) = test_server();
+        for path in ["z.rs", "a.rs", "m.rs"] {
+            server
+                .storage
+                .save_file(&crate::discovery::DiscoveredFile {
+                    path: path.into(),
+                    hash: [0; 32],
+                    size: 1,
+                })
+                .unwrap();
+        }
+        let first: Value =
+            serde_json::from_str(&server.tool_list_files(&json!({ "limit": 2 })).unwrap()).unwrap();
+        assert_eq!(first["files"][0]["path"], "a.rs");
+        assert_eq!(first["files"][1]["path"], "m.rs");
+        assert_eq!(first["next_offset"], 2);
+        assert_eq!(first["total"], 3);
     }
 
     #[test]

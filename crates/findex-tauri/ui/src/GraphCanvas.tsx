@@ -21,6 +21,7 @@ export default function GraphCanvas({ graph, selected, onSelect, theme, settings
   const autoFitRef = useRef(false);
   const [size, setSize] = useState({ width: 900, height: 700 });
   const [paused, setPaused] = useState(false);
+  const [hovered, setHovered] = useState<string | null>(null);
   const [pinned, setPinned] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState('');
   const [hops, setHops] = useState(0);
@@ -70,6 +71,22 @@ export default function GraphCanvas({ graph, selected, onSelect, theme, settings
     return { nodes, links, truncated: graph.truncated || nodes.length < graph.nodes.length };
   }, [graph, selected?.id, hops, edgeKind, minimumConfidence, categories]);
 
+  const neighbors = useMemo(() => {
+    const values = new Map<string, string[]>();
+    for (const link of filteredGraph.links) {
+      const source = nodeId(link.source);
+      const target = nodeId(link.target);
+      values.set(source, [...(values.get(source) ?? []), target]);
+      values.set(target, [...(values.get(target) ?? []), source]);
+    }
+    return values;
+  }, [filteredGraph.links]);
+
+  const emphasized = useMemo(() => {
+    const anchor = hovered ?? selected?.id;
+    return anchor ? new Set([anchor, ...(neighbors.get(anchor) ?? [])]) : new Set<string>();
+  }, [hovered, selected?.id, neighbors]);
+
   useEffect(() => {
     if (!stageRef.current) return;
     const observer = new ResizeObserver(([entry]) => setSize({
@@ -89,6 +106,15 @@ export default function GraphCanvas({ graph, selected, onSelect, theme, settings
   useEffect(() => {
     autoFitRef.current = false;
   }, [graph.nodes.length, graph.links.length]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) graphRef.current?.pauseAnimation();
+      else if (!paused) graphRef.current?.resumeAnimation();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [paused]);
 
   function focusNode(node: GraphNode) {
     const positioned = node as MutableNode;
@@ -112,7 +138,11 @@ export default function GraphCanvas({ graph, selected, onSelect, theme, settings
 
   function togglePin() {
     if (!selected) return;
-    const node = selected as MutableNode;
+    toggleNodePin(selected);
+  }
+
+  function toggleNodePin(value: GraphNode) {
+    const node = value as MutableNode;
     const next = new Set(pinned);
     if (next.has(node.id)) {
       delete node.fx; delete node.fy; delete node.fz;
@@ -139,6 +169,13 @@ export default function GraphCanvas({ graph, selected, onSelect, theme, settings
     if ((event.target as HTMLElement).matches('input, textarea, select, button')) return;
     if (event.key.toLowerCase() === 'f') graphRef.current?.zoomToFit(450, 70);
     if (event.key === ' ') { event.preventDefault(); toggleAnimation(); }
+    if (selected && ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(event.key)) {
+      event.preventDefault();
+      const ids = neighbors.get(selected.id) ?? [];
+      const next = filteredGraph.nodes.find(node => node.id === ids[event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? Math.max(0, ids.length - 1) : 0]);
+      if (next) onSelect(next);
+    }
+    if (selected && event.key === 'Enter') focusNode(selected);
   }}>
     <div className="view-toolbar graph-toolbar">
       <div><h1>Code graph</h1><span>{filteredGraph.nodes.length.toLocaleString()} nodes · {filteredGraph.links.length.toLocaleString()} typed edges {filteredGraph.truncated && '· bounded'}</span></div>
@@ -160,26 +197,28 @@ export default function GraphCanvas({ graph, selected, onSelect, theme, settings
       width={size.width}
       height={Math.max(300, size.height)}
       graphData={filteredGraph as any}
-      backgroundColor={theme === 'dark' ? '#0d1117' : '#ffffff'}
+      rendererConfig={{ antialias: filteredGraph.nodes.length < 1600, alpha: false, powerPreference: 'high-performance' }}
+      backgroundColor={theme === 'dark' ? '#22272e' : '#ffffff'}
       nodeColor={(node: any) => colors[node.category as keyof typeof colors] ?? colors.code}
-      nodeVal={(node: any) => Math.min(12, 2.3 + Math.log2(1 + node.degree))}
+      nodeVal={(node: any) => Math.min(15, 2.3 + Math.log2(1 + node.degree) + (emphasized.has(node.id) ? 2.2 : 0))}
       nodeOpacity={theme === 'dark' ? .9 : .82}
-      nodeResolution={10}
+      nodeResolution={filteredGraph.nodes.length > 2500 ? 6 : filteredGraph.nodes.length > 1000 ? 8 : 12}
       nodeLabel={(node: any) => settings?.graph_labels === false ? '' : `${String(node.name).replace(/[<>]/g, '')} · ${node.kind}\n${node.file_path}`}
-      linkColor={(link: GraphLink) => nodeId(link.source) === selected?.id || nodeId(link.target) === selected?.id
+      linkColor={(link: GraphLink) => emphasized.has(nodeId(link.source)) && emphasized.has(nodeId(link.target))
         ? (theme === 'dark' ? '#58a6ff' : '#0969da')
         : (theme === 'dark' ? '#30363d' : '#afb8c1')}
       linkOpacity={theme === 'dark' ? .5 : .42}
-      linkWidth={(link: GraphLink) => (nodeId(link.source) === selected?.id || nodeId(link.target) === selected?.id ? 1.4 : .2) * (.65 + (link.confidence ?? .6))}
-      linkDirectionalArrowLength={2.2}
+      linkWidth={(link: GraphLink) => (emphasized.has(nodeId(link.source)) && emphasized.has(nodeId(link.target)) ? 1.5 : .18) * (.65 + (link.confidence ?? .6))}
+      linkDirectionalArrowLength={filteredGraph.links.length < 3000 ? 2.2 : 0}
       linkDirectionalArrowRelPos={1}
-      linkDirectionalParticles={(link: GraphLink) => !paused && settings?.graph_particles !== false && (nodeId(link.source) === selected?.id || nodeId(link.target) === selected?.id) ? 2 : 0}
+      linkDirectionalParticles={(link: GraphLink) => !paused && filteredGraph.links.length < 3000 && settings?.graph_particles !== false && emphasized.has(nodeId(link.source)) && emphasized.has(nodeId(link.target)) ? 2 : 0}
       linkDirectionalParticleColor={() => theme === 'dark' ? '#58a6ff' : '#0969da'}
       linkDirectionalParticleWidth={1.5}
       linkDirectionalParticleSpeed={.003}
       warmupTicks={40}
       cooldownTicks={120}
       d3AlphaDecay={.035}
+      d3AlphaMin={.002}
       d3VelocityDecay={.35}
       onEngineStop={() => {
         if (autoFitRef.current) return;
@@ -187,6 +226,8 @@ export default function GraphCanvas({ graph, selected, onSelect, theme, settings
         graphRef.current?.zoomToFit(settings?.motion === false ? 0 : 300, 70);
       }}
       onNodeClick={(node: any) => onSelect(node as GraphNode)}
+      onNodeHover={(node: any) => setHovered(node?.id ?? null)}
+      onNodeRightClick={(node: any, event: MouseEvent) => { event.preventDefault(); onSelect(node as GraphNode); toggleNodePin(node as GraphNode); }}
       onNodeDragEnd={(node: any) => {
         if (pinned.has(node.id)) { node.fx = node.x; node.fy = node.y; node.fz = node.z; }
       }}

@@ -1,0 +1,8 @@
+attribute definition = node => type = "pop_symbol", symbol = (source-text node), source_node = node, is_definition
+global ROOT_NODE
+
+[(element (start_tag (tag_name)@name)) (self_closing_tag (tag_name)@name)] {
+  node symbol
+  attr (symbol) definition = @name
+  edge ROOT_NODE -> symbol
+}

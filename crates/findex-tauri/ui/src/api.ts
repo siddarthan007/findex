@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { mockGraph, mockRuntime, mockSettings, mockStats } from './mock';
-import type { ArchitectureOverview, AstOutline, DeepLinkPayload, DesktopUpdateInfo, FindexSettings, GraphSnapshot, ImpactReport, ModelStatus, RuntimeProfile, SearchResult, SourcePreview, Stats, SymbolRecord } from './types';
+import type { ArchitectureOverview, AstOutline, DeepLinkPayload, DesktopUpdateInfo, FindexSettings, GraphSnapshot, ImpactReport, ModelStatus, RuntimeProfile, SearchResult, SourcePreview, Stats, SymbolRecord, TelemetryStatus, UserProfile } from './types';
 
 const isTauri = () => '__TAURI_INTERNALS__' in window;
 let connection: Promise<{ baseUrl: string; token: string }> | null = null;
@@ -22,6 +22,26 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const api = {
+  async authStatus(): Promise<UserProfile | null> {
+    if (!isTauri()) return null;
+    return invoke<UserProfile | null>('auth_status');
+  },
+  async login(): Promise<UserProfile> {
+    if (!isTauri()) return { uid: 'preview', email: 'preview@localhost', display_name: 'Preview user', signed_in_at: new Date().toISOString() };
+    return invoke<UserProfile>('auth_login');
+  },
+  async logout(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>('auth_logout');
+  },
+  async telemetryStatus(): Promise<TelemetryStatus> {
+    if (!isTauri()) return { enabled: false, queued_events: 0, queued_bytes: 0, queue_limit_bytes: 4 * 1024 * 1024, source_collection_active: false };
+    return invoke<TelemetryStatus>('telemetry_status');
+  },
+  async flushTelemetry(): Promise<number> {
+    if (!isTauri()) return 0;
+    return invoke<number>('telemetry_flush');
+  },
   async pendingDeepLink(): Promise<DeepLinkPayload | null> {
     if (!isTauri()) return null;
     return invoke<DeepLinkPayload | null>('take_pending_deep_link');
@@ -83,7 +103,29 @@ export const api = {
     return request('/api/search', { query, mode, limit: 50 });
   },
   async source(symbol: Pick<SymbolRecord, 'file_path' | 'start_line' | 'end_line'>): Promise<SourcePreview | null> {
-    if (!isTauri()) return null;
+    if (!isTauri()) {
+      const isTypeScript = /\.(?:tsx?|vue)$/i.test(symbol.file_path);
+      const text = isTypeScript
+        ? [
+            'export async function loadContext(query: string): Promise<ContextBundle> {',
+            '  const candidates = await index.search(query);',
+            '  return graph.prune(candidates, { tokenBudget: 2048 });',
+            '}',
+          ].join('\n')
+        : [
+            'pub async fn load_context(query: &str) -> Result<ContextBundle> {',
+            '    let candidates = index.search(query).await?;',
+            '    graph.prune(candidates, TokenBudget::new(2048))',
+            '}',
+          ].join('\n');
+      return {
+        path: symbol.file_path,
+        start_line: symbol.start_line,
+        end_line: symbol.start_line + 3,
+        text,
+        truncated: false,
+      };
+    }
     return request('/api/source', { path: symbol.file_path, start_line: symbol.start_line, end_line: symbol.end_line });
   },
   async query(query: string): Promise<string> {

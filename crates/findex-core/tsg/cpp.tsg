@@ -1,0 +1,19 @@
+attribute definition = node => type = "pop_symbol", symbol = (source-text node), source_node = node, is_definition
+global ROOT_NODE
+attribute reference = node => type = "push_symbol", symbol = (source-text node), source_node = node, is_reference
+
+(function_definition declarator: (_ declarator: [(identifier) (field_identifier)]@name)) {
+  node symbol
+  attr (symbol) definition = @name
+  edge ROOT_NODE -> symbol
+}
+[(class_specifier name: (type_identifier)@name) (struct_specifier name: (type_identifier)@name) (namespace_definition name: (namespace_identifier)@name)] {
+  node symbol
+  attr (symbol) definition = @name
+  edge ROOT_NODE -> symbol
+}
+(call_expression function: (identifier)@name) {
+  node reference
+  attr (reference) reference = @name
+  edge reference -> ROOT_NODE
+}

@@ -1,5 +1,6 @@
 //! Persistent, bounded MCP task state.
 
+use crate::cancellation::CancellationToken;
 use crate::storage::{Storage, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -55,6 +56,7 @@ impl TaskRecord {
 
 struct TaskState {
     tasks: HashMap<String, TaskRecord>,
+    tokens: HashMap<String, CancellationToken>,
 }
 
 pub struct TaskManager {
@@ -84,7 +86,10 @@ impl TaskManager {
             .collect();
         Self {
             storage,
-            state: Mutex::new(TaskState { tasks }),
+            state: Mutex::new(TaskState {
+                tasks,
+                tokens: HashMap::new(),
+            }),
             changed: Condvar::new(),
             max_concurrent: env_usize("FINDEX_MAX_CONCURRENT_TASKS", 4).clamp(1, 64),
             max_ttl_ms: env_u64("FINDEX_MAX_TASK_TTL_MS", 3_600_000).clamp(10_000, 86_400_000),
@@ -122,7 +127,8 @@ impl TaskManager {
             result: None,
             expires_at_ms: now_ms().saturating_add(ttl as u128),
         };
-        state.tasks.insert(task_id, record.clone());
+        state.tasks.insert(task_id.clone(), record.clone());
+        state.tokens.insert(task_id, CancellationToken::default());
         self.persist_locked(&state)
             .map_err(|error| error.to_string())?;
         Ok(record)
@@ -146,6 +152,7 @@ impl TaskManager {
             };
             task.last_updated_at = now_rfc3339();
             task.result = Some(result);
+            state.tokens.remove(task_id);
             let _ = self.persist_locked(&state);
         }
         self.changed.notify_all();
@@ -168,6 +175,9 @@ impl TaskManager {
     pub fn cancel(&self, task_id: &str) -> Result<TaskRecord, String> {
         let mut state = self.state.lock().expect("task state poisoned");
         self.cleanup_locked(&mut state);
+        if let Some(token) = state.tokens.get(task_id) {
+            token.cancel();
+        }
         let record = {
             let task = state
                 .tasks
@@ -185,6 +195,15 @@ impl TaskManager {
             .map_err(|error| error.to_string())?;
         self.changed.notify_all();
         Ok(record)
+    }
+
+    pub fn token(&self, task_id: &str) -> Option<CancellationToken> {
+        self.state
+            .lock()
+            .expect("task state poisoned")
+            .tokens
+            .get(task_id)
+            .cloned()
     }
 
     pub fn wait_terminal(&self, task_id: &str) -> Option<TaskRecord> {
@@ -213,6 +232,9 @@ impl TaskManager {
             .collect();
         for id in expired {
             state.tasks.remove(&id);
+            if let Some(token) = state.tokens.remove(&id) {
+                token.cancel();
+            }
             let _ = self.storage.remove_metadata(&format!("mcp:task:{id}"));
         }
         let _ = self.persist_locked(state);

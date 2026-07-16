@@ -55,9 +55,17 @@ npm run tauri:build -- --config tauri.updater.conf.json
 
 For a local unsigned Windows installer smoke test, use `npm run build:installer:unsigned`. Release bundles keep updater artifact signing enabled.
 
-Desktop deep links are allowlisted and parameterized: `findex://search?q=...&mode=hybrid`, `findex://symbol?id=...`, `findex://open?path=...`, `findex://graph`, and `findex://settings`. Treat all URL parameters as untrusted input; the application bounds URL/query length and never interprets a deep link as a shell command.
+Desktop deep links are allowlisted and parameterized: `findex://search?q=...&mode=hybrid`, `findex://symbol?id=...`, `findex://open?path=...`, `findex://graph`, `findex://settings`, and `findex://auth`. Treat all URL parameters as untrusted input; the application bounds URL/query length and never interprets a deep link as a shell command.
 
 Tagged GitHub releases build locked CLI artifacts and Tauri installers on Windows/Linux. Production signing credentials must be configured in the release environment; do not embed them in the repository.
+
+## Account and privacy
+
+`findex auth login` opens the hosted Firebase bridge in the system browser, validates a one-time loopback callback on `127.0.0.1`, exchanges the Google ID token with Firebase Auth, stores only the refresh credential in the OS vault, and atomically persists a non-secret profile. CLI, TUI, and desktop share that vault. Use `findex auth logout` to remove both.
+
+Diagnostics are disabled by default. `findex settings set --telemetry true` opens only the master gate; hardware, project metrics, crash counters, and manual source permission remain separate flags. Events never include queries, paths, symbol names, repository identity, or automatic source samples. The queue is zstd-compressed, capped at 4 MiB/1,000 events, uploaded in batches of 20 to the authenticated user's namespace, and preserved on failure. The client does not collect raw IP or country. Inspect with `findex telemetry status`; upload explicitly with `findex telemetry flush`.
+
+Firestore provisioning requires an explicit permanent region decision. Deploy Hosting/Auth independently, then select and document the database region before deploying the deny-by-default rules in `firebase/firestore.rules`.
 
 ## Model lifecycle
 

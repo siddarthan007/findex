@@ -290,7 +290,7 @@ The engine must register the following tools:
 
 Long-running tools may opt into MCP Tasks by adding `task` to the original `tools/call`. Implement `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel`; do not invent a `tasks/create` method. Tasks are experimental in MCP `2025-11-25`, so task support must be advertised accurately and bounded by TTL and concurrency limits.
 
-Support stdio plus a stateless Streamable HTTP JSON POST endpoint. HTTP must bind to loopback by default, validate `Origin` and the MCP protocol-version header, and require a bearer token for any non-loopback bind. Do not advertise GET/SSE resumability or session IDs until implemented.
+Support stdio plus Streamable HTTP POST/GET/DELETE. HTTP must bind to loopback by default, validate `Origin` and the MCP protocol-version header, require a bearer token for any non-loopback bind, and cap request bodies. Session IDs must be random and expiring; SSE replay must be count/byte bounded and scoped so an event ID can never replay another session.
 
 ### 7.2 Progressive Disclosure (SKILL.md)
 Findex ships with a `SKILL.md` file that teaches coding agents how to interact with the engine. Only the tool descriptions are loaded at agent startup (~30-50 tokens). The complete instructions are loaded on demand.
@@ -322,6 +322,6 @@ Development is split into 4 phases. Work on a phase cannot start until the gatin
 - **Performance Gate**: Cross-file go-to-definition queries must resolve in **<100 ms**. Reranking accuracy (NDCG@10) must show a **>15% improvement** over baseline hybrid retrieval.
 
 ### Phase 3: Accelerators & UI (Weeks 19+)
-- **Implemented Wave 3 scope**: persisted Merkle comparison, bounded Stack Graph resolution for published Python/JavaScript/TypeScript/TSX/Java packages, Vue SFC parsing, task-augmented MCP calls, stateless HTTP POST, advanced Ratatui, and React/Tauri/Axum graph exploration.
-- **Remaining accelerator scope**: true TurboQuant, CodeScout/Ornith fallback wrappers, cooperative cancellation within every CPU-bound operation, and resumable MCP SSE/session handling.
+- **Implemented Wave 3 scope**: persisted Merkle comparison; published Stack Graph packages plus validated bounded lexical TSG rules; Vue SFC parsing; task-augmented MCP calls with cooperative cancellation; session-bound Streamable HTTP POST/GET/DELETE and bounded SSE replay; advanced Ratatui; React/Tauri/Axum graph exploration; unified packaging; shared OAuth profile; and consent-gated diagnostics.
+- **Remaining accelerator scope**: true TurboQuant, benchmark-gated CodeScout/Ornith fallback wrappers, framework/compiler-grade semantics beyond current TSG coverage, and a separately versioned storage-backend migration.
 - **Performance Gate**: benchmark graph frame time at multiple bounded node counts on target hardware; benchmark vector recall and storage before changing scalar formats. Do not treat an unmeasured 10,000-node/60 FPS target as a shipped guarantee.

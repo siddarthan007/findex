@@ -43,7 +43,7 @@ oxc_syntax = "0.13"
 tempfile = "3.10"
 notify-debouncer-mini = "0.4"
 notify = "6.1"
-tantivy = "0.22"
+tantivy = "0.26.1"
 usearch = "2.1"
 petgraph = "0.6"
 ort = "2.0.0-rc.12"
@@ -51,19 +51,35 @@ tokenizers = { version = "0.21", default-features = false, features = ["fancy-re
 ndarray = "0.17"
 streaming-iterator = "0.1.9"
 axum = "0.8.9"
-tower-http = { version = "0.7.0", features = ["trace"] }
+tower-http = { version = "0.7.0", features = ["cors", "trace"] }
 uuid = { version = "1.23.5", features = ["v4", "serde"] }
 time = { version = "0.3.53", features = ["formatting", "serde"] }
 sysinfo = "0.39.6"
 hf-hub = { version = "1.0.0", features = ["blocking", "rustls-tls"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "rustls", "json"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "form", "rustls", "json"] }
 semver = "1.0.28"
 minisign-verify = "0.2.5"
 base64 = "0.22.1"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 self-replace = "1.5.0"
+directories = "6.0.0"
+keyring = "4.1.5"
+url = "2.5.8"
+webbrowser = { version = "1.2.1", features = ["hardened"] }
+zstd = { version = "0.13.3", default-features = false }
 stack-graphs = "0.14.1"
 tree-sitter-stack-graphs-python = "0.3.0"
 tree-sitter-stack-graphs-javascript = "0.3.0"
 tree-sitter-stack-graphs-typescript = "0.4.0"
 tree-sitter-stack-graphs-java = "0.5.0"
+
+# Tauri 2's Linux WebKitGTK chain is still pinned to gtk-rs 0.18. This exact
+# commit is the two-line upstream VariantStrIter soundness fix backported to
+# glib 0.18.5. Remove these pins once Tauri's GTK stack uses glib >= 0.20.
+[patch.crates-io]
+glib = { git = "https://github.com/Quickture/gtk-rs-core", rev = "40b7211287f85b7d06077dcf4457c80a4ab1c57e" }
+glib-macros = { git = "https://github.com/Quickture/gtk-rs-core", rev = "40b7211287f85b7d06077dcf4457c80a4ab1c57e" }
+glib-sys = { git = "https://github.com/Quickture/gtk-rs-core", rev = "40b7211287f85b7d06077dcf4457c80a4ab1c57e" }
+gobject-sys = { git = "https://github.com/Quickture/gtk-rs-core", rev = "40b7211287f85b7d06077dcf4457c80a4ab1c57e" }
+gio = { git = "https://github.com/Quickture/gtk-rs-core", rev = "40b7211287f85b7d06077dcf4457c80a4ab1c57e" }
+gio-sys = { git = "https://github.com/Quickture/gtk-rs-core", rev = "40b7211287f85b7d06077dcf4457c80a4ab1c57e" }

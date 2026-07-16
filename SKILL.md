@@ -1,6 +1,6 @@
 ---
 name: findex
-description: "Local, token-bounded codebase intelligence through MCP and CLI: architecture mapping, hybrid search, exact symbol navigation, structural context prediction/pruning, impact analysis, speculative VFS compilation, semantic diffs, trace/taint pinning, and runtime diagnostics. Use before reading many files, when locating or changing code, tracing behavior, reviewing a refactor, investigating unfamiliar architecture, or reducing agent retrieval calls and context tokens."
+description: "Use Findex as a local, token-bounded replacement for broad code fetching and repeated repository search. It provides architecture maps, natural-language and exact hybrid search, symbol/AST navigation, typed graph retrieval, context pruning, impact analysis, speculative VFS parsing, semantic diffs, trace/taint evidence, and runtime controls. Trigger before reading many files, locating or changing code, tracing behavior such as 'where auth calls the API', reviewing a refactor, learning an unfamiliar codebase, or reducing agent calls, tokens, latency, and compute."
 ---
 
 # Findex
@@ -118,7 +118,9 @@ After writing verified edits to disk, run the language's formatter/compiler/test
 
 Use MCP task mode for tools advertising `execution.taskSupport: optional`, especially `reindex`, large context bundles, repo maps, and structural diffs. Attach `task: { "ttl": 300000 }` to the original `tools/call`, then use `tasks/get` or `tasks/result`. Cancel obsolete work instead of launching duplicates.
 
-Task cancellation marks the protocol task terminal but may not pre-empt CPU work already in progress. Avoid speculative concurrent reindexes against the same database.
+Task cancellation is cooperative and propagates into discovery, parallel parsing, index stages, retrieval, graph queries, semantic diff alignment, and Stack Graph construction/stitching. ONNX calls and filesystem/library operations are checked immediately before and after because their foreign calls cannot be safely interrupted mid-instruction. Reuse one task ID; do not launch a replacement until the cancelled task reports terminal.
+
+For Streamable HTTP, retain the `Mcp-Session-Id` returned by `initialize` and send `MCP-Protocol-Version: 2025-11-25` afterward. Request `text/event-stream` when replay is useful. On reconnect, issue `GET /mcp` with the same session and `Last-Event-ID`; never reuse an event ID with another session. Send `DELETE /mcp` when the client intentionally terminates the session.
 
 ## Failure ladder
 
@@ -135,7 +137,7 @@ If relationships conflict with source, trust current source, report the stale/he
 
 ## Capability boundaries
 
-- Published Stack Graph rules provide exact resolution only for Python, JavaScript, TypeScript/TSX, and Java in this build. Other languages use parser-backed symbols plus heuristic resolution.
+- Published Stack Graph packages provide the broadest exact resolution for Python, JavaScript, TypeScript/TSX, and Java. Rust, C/C++, Dart, Go, HTML, and CSS include validated bundled lexical TSG rules plus typed parser/heuristic edges. Inspect `published_rule_files`, `bundled_rule_files`, edge tags, and timeout status before describing an edge as exact.
 - Dynamic language resolution remains partial even with Stack Graphs.
 - CUDA accelerates compatible ONNX embedding/reranking inference only. Parsing, hashing, graph building, Tantivy, and USearch remain CPU work.
 - Runtime settings can select `auto`, `cpu`, or `cuda`; a CUDA request still falls back safely when the binary/provider/hardware is incompatible.
@@ -152,5 +154,7 @@ If relationships conflict with source, trust current source, report the stale/he
 ## Human interfaces
 
 Use `findex tui` for interactive search, typed-edge graph filtering, 0-4 hop neighborhoods, pan/zoom/fit, graph queries, impact inspection, reindexing, and resource telemetry. Set `FINDEX_TUI_ICONS=ascii` without a Nerd Font and `FINDEX_TUI_MOTION=0` for reduced motion.
+
+Use `findex auth login|status|logout` for the profile shared by CLI, TUI, and desktop. Use `findex telemetry status|flush` only after the human has enabled diagnostics. Agents must not enable telemetry or source consent on a user's behalf.
 
 Use `findex settings show` to inspect the same persisted controls used by MCP, TUI, and desktop; `findex settings set --help` changes only named values. Use `findex --format json <command>` for scripts. Use `findex models --profile fast` for the CPU-first default, choose `balanced` only when code-specialized accuracy justifies a 768d rebuild, and reserve `quality` for measured offline evaluation. Verify cache-only operation with the same profile plus `--offline`, and run `findex doctor --format json` before enabling CUDA. Use `findex update check` for read-only release discovery; never call `update install --yes` for a human unless they explicitly authorized installation.

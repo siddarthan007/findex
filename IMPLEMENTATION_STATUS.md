@@ -34,13 +34,13 @@ This file records what is implemented from `implementation_plan.md` and keeps pr
 - MCP `2025-11-25` task-augmented `tools/call` is implemented; the outdated draft `tasks/create` method is not.
 - Persistent Sled task records include secure UUIDs, RFC 3339 timestamps, status, TTL, poll interval, result, and tool identity.
 - `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel` are implemented with bounded TTL and concurrent-task limits.
-- Cancellation is terminal and discards late results. CPU-bound calls are not forcibly interrupted mid-operation yet.
+- Cancellation is terminal, discards late results, and cooperatively interrupts discovery, parsing, index stages, retrieval, graph queries, semantic diff, and Stack Graph work. Foreign ONNX/filesystem/library calls checkpoint before and after rather than being interrupted mid-call.
 
 ### 3.4 Streamable HTTP
 
-- Axum serves stateless MCP JSON POST at `/mcp` plus `/health`.
+- Axum serves MCP POST/GET/DELETE at `/mcp` plus `/health`, with expiring UUID sessions and bounded session-specific SSE replay.
 - It validates MCP protocol headers and browser Origins, binds to loopback by default, uses constant-time bearer comparison, and rejects non-loopback startup without a bearer token.
-- Scope boundary: GET/SSE resumability and MCP session IDs are not advertised.
+- Replay event IDs cannot cross sessions; malformed/foreign IDs are rejected, explicit DELETE terminates a session, and session/replay count and byte budgets are hard-capped.
 
 ### 3.5 Vue SFC parsing
 
@@ -76,6 +76,9 @@ This file records what is implemented from `implementation_plan.md` and keeps pr
 - MCP adds structured search output, `get_settings`, `set_setting`, `findex://architecture`, and `findex://settings`. Runtime gates reject disabled VFS, micro-compile, trace/taint pinning, and structural-prefetch calls explicitly.
 - MCP now exposes drop-in `fetch_context`, exact indexed-only `fetch_file`, `find_files`, and local-only `list_models`. `structured`, `compact`, and `text` response modes avoid duplicating the same payload into both MCP content channels.
 - `findex setup-agent` safely installs MCP plus the portable skill for Codex, Claude, Cursor, and Antigravity, supports `--dry-run`, preserves unrelated servers, backs up JSON configs, and requires `--force` before replacing a different Findex entry.
+- Google sign-in is shared by CLI, TUI, and desktop through Firebase Auth and the OS credential vault. Diagnostics remain master-off by default, collect no automatic source/query/path/repository identity, and retain failed zstd-compressed uploads in a bounded queue. Firestore has been successfully provisioned and its rules/indexes deployed to findexcodeintelligence.
+- Desktop/TUI presentation now uses a shared eight-frame Nord activity glyph, soft GitHub light/dark tokens, reduced-motion behavior, human-readable finding/evidence/next-step reports, and source syntax highlighting. WebGL graph resolution, particles, and motion adapt to graph size and pause while hidden.
+- MCP stdio and HTTP requests are capped at 1 MiB, file listings use deterministic pagination, and the file-tree resource has a 4 MiB ceiling.
 
 ## Language and bounded-context hardening
 
@@ -87,15 +90,14 @@ This file records what is implemented from `implementation_plan.md` and keeps pr
 
 ## Correctness and verification
 
-- 98 `findex-core` tests and 4 `findex-cli` tests pass, including real Tauri/Minisign updater-format compatibility, updater transport/path safety, relationship-query ranking, query-cache bounds, deterministic architecture summaries, model-profile and vector-fingerprint migration, wide-AST memory bounds, VFS persistence/eviction, graph-pruning behavior, trace validation, complex C#/Ruby/PHP/Swift OOP fixtures, ingestion sprite clipping, pointer navigation, and every TUI view.
+- 116 workspace tests pass in the current hardening tree (112 core and 4 CLI/TUI), including updater compatibility/safety, relationship-query ranking, cancellation, MCP replay/bounds and stale-event rejection, TSG rule compilation, consent telemetry and queue eviction, query-cache bounds, deterministic architecture summaries, model/vector migration, wide-AST memory bounds, VFS persistence/eviction, graph pruning, trace validation, and complex language fixtures.
 - `cargo test --workspace --locked` and `cargo clippy --workspace --all-targets --locked -- -D warnings` pass.
 - Vue, Merkle, Stack Graph, generated-tree exclusion, normalized AST lookup, connected graph sampling, HTTP header policy, and MCP task lifecycle have direct tests.
-- The production React bundle type-checks/builds; rendered browser QA covered light/dark graph settling, pause/resume, architecture, manual search, settings transitions, result rendering, layout, and console warnings/errors. Optimized Tauri produces the desktop binary plus a unified NSIS installer containing the CLI/TUI sidecar; an isolated install was launched from System32 and deep-linked without spawning a second instance.
+- The production React bundle type-checks/builds; rendered browser QA covered light/dark graph settling, graph interaction, account/privacy settings, compact layout, behavioral search, highlighted exact ranges, and console warnings/errors. Optimized Tauri produces the desktop binary plus a 30.97 MB unified NSIS installer containing the CLI/TUI sidecar. The release executable launched from a System32 working directory, reached its native window, accepted a dynamic settings deep link through the single-instance handoff, and exited cleanly after the smoke test.
 
 ## Deliberately future work
 
 - True TurboQuant (rotation/calibration plus recall and latency evaluation).
 - Versioned migration from sled to a maintained transactional backend.
-- Cooperative interruption inside every CPU-bound task.
-- MCP SSE resumability/session handling.
-- TSG rules for Rust, C/C++, Dart, Go, HTML/CSS, and framework-specific module semantics beyond the currently published language packages.
+- Compiler-grade and framework-specific name/module semantics beyond the current published and bundled lexical TSG rules.
+- Cross-device account preference sync and Firestore reporting after provisioning and deploying the database rules/indexes.

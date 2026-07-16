@@ -73,10 +73,10 @@ Returns signatures/nesting without bodies. Prefer this over reading a long file 
 `list_files`
 
 ```json
-{}
+{ "offset": 0, "limit": 500 }
 ```
 
-Returns every indexed path with its byte size. Use it to verify index scope or choose a file; do not inline the result into a prompt when a repo map or architecture overview is sufficient.
+Returns a deterministic page with `files`, `total`, `returned`, `next_offset`, and `truncated`. The default page is 500 and the hard maximum is 5,000. Use it to verify index scope or choose a file; do not inline the inventory into a prompt when a repo map or architecture overview is sufficient.
 
 ## Exact navigation
 
@@ -128,7 +128,7 @@ Nested symbol outline, including multi-language Vue SFC children.
 { "query": "MATCH (a)-[:Calls]->(b) WHERE a.name = 'main' RETURN a, b LIMIT 50" }
 ```
 
-Use the supported Cypher-like subset and always bound the return size.
+The accepted shape is `MATCH (a)-[edge:Calls]->(b) WHERE ... RETURN ... LIMIT n`. Edge alias/type are optional. Fields are `name`, `kind`, `file_path`/`path`, `language`, `signature`, and `qualified_name`; comparisons are `=`, `CONTAINS`, `STARTS WITH`, and `ENDS WITH`; combine conditions with `AND`. Aliases must be declared, node aliases must differ, strings must close, and trailing tokens are errors. Input is capped at 16,384 characters/2,048 tokens and results at 10,000; use a much smaller explicit limit for agent context.
 
 `get_graph_snapshot`
 
@@ -235,10 +235,10 @@ Returns file/symbol/edge/vector counts, Merkle root, Stack Graph status, and a C
 `list_files`
 
 ```json
-{}
+{ "offset": 0, "limit": 500 }
 ```
 
-Potentially large. Use only to verify path presence or inventory.
+Paginated and bounded. Use only to verify path presence or inventory.
 
 `reindex`
 
@@ -270,4 +270,6 @@ Read `findex://repo/map`, `findex://tree`, `findex://stats`, `findex://architect
 
 Available prompts are `understand_symbol`, `plan_refactor`, and `trace_call`. They are starting recipes, not substitutes for task-specific budgets and verification.
 
-For task-enabled calls, add a `task` object to `tools/call`; use `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel`. MCP protocol `2025-11-25` does not define `tasks/create` here.
+For task-enabled calls, add a `task` object to `tools/call`; use `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel`. Cancellation propagates cooperatively into Findex CPU stages. MCP protocol `2025-11-25` does not define `tasks/create` here.
+
+For Streamable HTTP, initialize without a session, retain the returned `Mcp-Session-Id`, and send it with `MCP-Protocol-Version: 2025-11-25` on later POST/GET/DELETE requests. SSE responses carry bounded session-scoped event IDs. Resume with `GET /mcp`, `Accept: text/event-stream`, and `Last-Event-ID`; a foreign or malformed event ID is rejected rather than replaying another session. Stdio rejects and drains requests over 1 MiB; the next valid JSON-RPC line remains usable.

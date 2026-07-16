@@ -7,10 +7,10 @@ Its differentiator from editor search is the retrieval product: Findex does not 
 ## Implemented in Wave 3
 
 - Hierarchical, persisted BLAKE3 Merkle snapshots. Recursive comparison stops at equal directory hashes and reports only changed/deleted leaves; discovery still hashes supported files for correctness. Generated dependency/build/index trees are pruned even without a `.gitignore` to prevent accidental CPU/RAM blowups.
-- Stack Graph resolution enabled by default for Python, JavaScript, TypeScript/TSX, and Java using published TSG packages. Exact cross-file `References` edges are tagged separately; other languages retain the heuristic resolver.
+- Stack Graph resolution enabled by default for Python, JavaScript, TypeScript/TSX, and Java using published packages. Rust, C/C++, Dart, Go, HTML, and CSS ship validated bounded lexical TSG rules; provenance distinguishes published resolution from bundled lexical resolution and heuristic parser edges.
 - Source-accurate Vue SFC parsing. `<script>` uses Oxc, CSS `<style>` uses tree-sitter, template component tags produce reference edges, and all virtual block ranges map back to the `.vue` file.
 - MCP `2025-11-25` task-augmented tool calls with persistent task records, TTL bounds, concurrency limits, `tasks/get`, `tasks/result`, `tasks/list`, and `tasks/cancel`.
-- MCP Streamable HTTP JSON POST transport at `/mcp`, with protocol-version checks, Origin validation, loopback binding by default, and bearer authentication required for non-loopback binds.
+- MCP Streamable HTTP POST/GET/DELETE transport at `/mcp`, with expiring sessions, bounded session-scoped SSE replay, protocol-version checks, Origin validation, loopback binding by default, and bearer authentication required for non-loopback binds.
 - Agent-focused MCP products: token-bounded context bundles, impact analysis, AST outlines, graph snapshots, and runtime resource profiles.
 - Major-language indexing now covers JavaScript/TypeScript/JSX/TSX, Vue, Rust, Python, HTML/CSS, Dart, C/C++, Go, Java, C#, Ruby, PHP, and Swift. OOP contracts, inheritance, constructors, methods, modules/namespaces, traits/mixins/protocols, records, extensions, and enum variants are normalized into the shared graph model.
 - Structural prefetch is hop/fan-out/work-set bounded; context bundles combine retrieval anchors with graph-local neighbors and include an auditable selection reason. Token graph pruning preserves explicit seeds and skips oversized distractions instead of terminating the search.
@@ -21,6 +21,7 @@ Its differentiator from editor search is the retrieval product: Findex does not 
 - Signed background update checks for long-running CLI/TUI hosts and Tauri. Installation is never silent: CLI, TUI, and desktop require user consent, then verify the release signature before replacement.
 - One Tauri platform installer contains the desktop executable and the release `findex` sidecar, so the same install adds CLI commands and `findex tui`; Windows packages also maintain the user PATH on install/uninstall.
 - Optional stages are runtime gates, not build variants. Index-local settings control lexical/semantic indexing, reranking, graph expansion, structural prefetch, Stack Graphs, watchers, VFS/trace pinning, graph limits, model/device/memory policy, and UI appearance across CLI, TUI, desktop, and MCP.
+- Optional Firebase Google sign-in shares a profile across desktop, CLI, and TUI through the operating-system credential vault. Diagnostics remain off by default, source-free automatic events are separately gated, and failed uploads stay in a bounded compressed queue.
 
 ## Retrieval pipeline
 
@@ -74,11 +75,13 @@ findex ast crates/findex-core/src/lib.rs --format json
 findex graph-export --limit 1000 > graph.json
 findex mcp
 findex mcp-http --bind 127.0.0.1:37420
+findex auth login
+findex telemetry status --format json
 findex setup-agent all --dry-run
 findex setup-agent codex
 ```
 
-For HTTP, set `FINDEX_MCP_TOKEN` before binding beyond loopback. The current server is stateless JSON Streamable HTTP: POST is implemented, while GET/SSE resumability and MCP session IDs are intentionally not advertised.
+For HTTP, set `FINDEX_MCP_TOKEN` before binding beyond loopback. Initialize with POST, retain the returned `Mcp-Session-Id`, and send it with `MCP-Protocol-Version: 2025-11-25` on later POST/GET/DELETE calls. SSE event IDs are bounded and session-scoped; resume with the same session plus `Last-Event-ID`.
 
 ## MCP tools that save agent work
 
@@ -114,7 +117,7 @@ Long tools declaring `execution.taskSupport: optional` can be invoked with a nor
 }
 ```
 
-There is no `tasks/create` method in MCP `2025-11-25`; tasks augment the original request. Cancellation is terminal and prevents a late result from replacing the cancelled state. Existing CPU-bound library operations are not forcibly pre-empted mid-call yet.
+There is no `tasks/create` method in MCP `2025-11-25`; tasks augment the original request. Cancellation is terminal and cooperatively interrupts discovery, parsing, index stages, retrieval, graph work, semantic diff, and Stack Graph construction/stitching. Foreign ONNX/filesystem/library calls checkpoint immediately before and after because they cannot be safely interrupted in the middle of the call.
 
 ## Desktop UI
 
@@ -196,7 +199,7 @@ Findex targets MCP [`2025-11-25`](https://modelcontextprotocol.io/specification/
 
 The primary store remains sled behind the `Storage` abstraction; a backend migration needs a separately versioned compatibility and rollback wave. USearch scalar formats are not TurboQuant. Actual TurboQuant requires rotation, calibration, and recall benchmarks and remains a future backend.
 
-Stack Graph exact cross-file resolution remains limited to its shipped Python, JavaScript/TypeScript/TSX, and Java TSG packages; other indexed languages use AST edges plus heuristic resolution. Kotlin is not enabled because the available grammar dependency is ABI-incompatible with the tree-sitter/Stack Graph version currently pinned. Semantic diff is a bounded ordered approximation, not an exact Zhang-Shasha or GumTree implementation. VFS state is process-local by default; optional persistence is explicit because it writes unsaved source into the project index. CUDA accelerates compatible ONNX embedding and reranking sessions only; parsing, hashing, graph construction, lexical search, and vector lookup remain CPU work.
+Published Stack Graph packages provide the strongest resolution for Python, JavaScript/TypeScript/TSX, and Java. Bundled Rust, C/C++, Dart, Go, HTML, and CSS rules are validated and useful but intentionally lexical; their edge tags prevent consumers from overstating precision. Kotlin is not enabled because the available grammar dependency is ABI-incompatible with the tree-sitter/Stack Graph version currently pinned. Semantic diff is a bounded ordered approximation, not an exact Zhang-Shasha or GumTree implementation. VFS state is process-local by default; optional persistence is explicit because it writes unsaved source into the project index. CUDA accelerates compatible ONNX embedding and reranking sessions only; parsing, hashing, graph construction, lexical search, vector lookup, and terminal rendering remain CPU work.
 
 ## Verification
 

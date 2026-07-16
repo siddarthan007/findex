@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Sign in to Findex</title>
+    <link rel="stylesheet" href="/auth.css" />
+  </head>
+  <body>
+    <main>
+      <div class="mark" aria-hidden="true">:&gt;</div>
+      <h1>Sign in to Findex</h1>
+      <p>Continue with Google to use one Findex profile across the desktop, CLI, and TUI. Privacy choices remain local and under your control.</p>
+      <button id="sign-in" type="button">Continue with Google</button>
+      <output id="status" role="status" aria-live="polite">Waiting for you.</output>
+      <small>Findex does not receive your Google password. Source code is never included in account or analytics data by default.</small>
+    </main>
+    <script type="module" src="/auth.js"></script>
+  </body>
+</html>

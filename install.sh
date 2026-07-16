@@ -56,6 +56,17 @@ case "$asset_name" in
     mkdir -p "$install_dir" "$bin_dir"
     install -m 755 "$STAGING/$asset_name" "$install_dir/Findex.AppImage"
     ln -sf "$install_dir/Findex.AppImage" "$bin_dir/findex-desktop"
+    cli_url=$(printf '%s\n' "$urls" | grep -Ei "findex-linux-(${arch_pattern})\.zip" | head -n 1 || true)
+    [ -n "$cli_url" ] || { echo "The AppImage fallback requires the matching CLI archive." >&2; exit 1; }
+    cli_name=${cli_url##*/}
+    fetch "$cli_url" "$STAGING/$cli_name"
+    (cd "$STAGING" && grep "  $cli_name\$" SHA256SUMS > cli.sha256)
+    if command -v sha256sum >/dev/null 2>&1; then (cd "$STAGING" && sha256sum -c cli.sha256)
+    else (cd "$STAGING" && shasum -a 256 -c cli.sha256)
+    fi
+    command -v unzip >/dev/null 2>&1 || { echo "Install unzip to install the CLI/TUI." >&2; exit 1; }
+    unzip -p "$STAGING/$cli_name" findex > "$bin_dir/findex"
+    chmod 755 "$bin_dir/findex"
     ;;
   *.dmg)
     mount=$(hdiutil attach -nobrowse -readonly "$STAGING/$asset_name" | tail -n 1 | awk '{$1=$2=""; sub(/^  */, ""); print}')

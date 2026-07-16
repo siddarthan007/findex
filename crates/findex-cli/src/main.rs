@@ -144,7 +144,7 @@ enum Commands {
     },
     /// Start the Model Context Protocol (MCP) server on stdio
     Mcp,
-    /// Start the MCP Streamable HTTP endpoint (POST /mcp, GET /health)
+    /// Start MCP Streamable HTTP (POST/GET/DELETE /mcp, GET /health)
     McpHttp {
         #[arg(long, default_value = "127.0.0.1:37420")]
         bind: String,
@@ -203,6 +203,16 @@ enum Commands {
         #[command(subcommand)]
         command: SettingsCommand,
     },
+    /// Sign in, inspect, or clear the Firebase profile shared by every Findex surface
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    /// Inspect or upload the bounded consent-first diagnostics queue
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommand,
+    },
     /// Build or rebuild the vector index from stored symbols
     BuildVectors,
     /// Compare two source files structurally
@@ -244,6 +254,24 @@ enum UpdateCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Open Google sign-in in the system browser
+    Login,
+    /// Show the locally cached account profile without printing credentials
+    Status,
+    /// Remove the shared session from the OS credential vault
+    Logout,
+}
+
+#[derive(Subcommand)]
+enum TelemetryCommand {
+    /// Show effective consent and bounded local queue usage
+    Status,
+    /// Upload one authenticated bounded batch and preserve failures for retry
+    Flush,
 }
 
 #[derive(Subcommand)]
@@ -308,6 +336,16 @@ enum SettingsCommand {
         cursor_companion: Option<bool>,
         #[arg(long)]
         terminal_pointer_input: Option<bool>,
+        #[arg(long)]
+        telemetry: Option<bool>,
+        #[arg(long)]
+        crash_reports: Option<bool>,
+        #[arg(long)]
+        telemetry_hardware: Option<bool>,
+        #[arg(long)]
+        telemetry_project_metrics: Option<bool>,
+        #[arg(long)]
+        telemetry_source_samples: Option<bool>,
     },
     /// Restore production defaults
     Reset,
@@ -334,7 +372,18 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let persisted_settings = findex_core::settings::load_or_default(&cli.db_path);
     findex_core::runtime::apply_runtime_settings(&persisted_settings);
+    findex_core::telemetry::install_panic_hook(
+        cli.db_path.clone(),
+        std::sync::Arc::new(std::sync::RwLock::new(persisted_settings.clone())),
+    );
     let format = cli.output_format();
+    let _ = findex_core::telemetry::record_event(
+        &cli.db_path,
+        &persisted_settings,
+        None,
+        "cli_started",
+        serde_json::json!({ "surface": "cli" }),
+    );
 
     match &cli.command {
         Commands::Index { path } => {
@@ -1018,6 +1067,11 @@ async fn main() -> anyhow::Result<()> {
                     minimize_to_tray,
                     cursor_companion,
                     terminal_pointer_input,
+                    telemetry,
+                    crash_reports,
+                    telemetry_hardware,
+                    telemetry_project_metrics,
+                    telemetry_source_samples,
                 } => {
                     let mut settings = findex_core::settings::load(&cli.db_path)?;
                     if let Some(value) = lexical {
@@ -1105,6 +1159,21 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(value) = terminal_pointer_input {
                         settings.ui.terminal_pointer_input = *value;
                     }
+                    if let Some(value) = telemetry {
+                        settings.telemetry.enabled = *value;
+                    }
+                    if let Some(value) = crash_reports {
+                        settings.telemetry.crash_reports = *value;
+                    }
+                    if let Some(value) = telemetry_hardware {
+                        settings.telemetry.include_hardware = *value;
+                    }
+                    if let Some(value) = telemetry_project_metrics {
+                        settings.telemetry.include_project_metrics = *value;
+                    }
+                    if let Some(value) = telemetry_source_samples {
+                        settings.telemetry.include_source_samples = *value;
+                    }
                     findex_core::settings::save(&cli.db_path, settings)?
                 }
             };
@@ -1190,8 +1259,92 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Commands::Auth { command } => match command {
+            AuthCommand::Login => {
+                if format == OutputFormat::Text {
+                    println!("Opening secure Google sign-in in your browser…");
+                }
+                let profile = findex_core::auth::login().await?;
+                print_auth_profile(format, Some(&profile))?;
+            }
+            AuthCommand::Status => {
+                let profile = findex_core::auth::current_user()?;
+                print_auth_profile(format, profile.as_ref())?;
+            }
+            AuthCommand::Logout => {
+                findex_core::auth::logout()?;
+                match format {
+                    OutputFormat::Json => print_json(serde_json::json!({
+                        "authenticated": false,
+                        "status": "signed_out"
+                    }))?,
+                    OutputFormat::Compact => println!("authenticated=false"),
+                    OutputFormat::Text => println!("Signed out. The OS credential was removed."),
+                }
+            }
+        },
+        Commands::Telemetry { command } => {
+            let settings = findex_core::settings::load_or_default(&cli.db_path);
+            match command {
+                TelemetryCommand::Status => {
+                    let status = findex_core::telemetry::status(&cli.db_path, &settings)?;
+                    match format {
+                        OutputFormat::Json => print_json(serde_json::to_value(status)?)?,
+                        OutputFormat::Compact => println!(
+                            "enabled={}\tqueued={}\tbytes={}\tlimit={}",
+                            status.enabled,
+                            status.queued_events,
+                            status.queued_bytes,
+                            status.queue_limit_bytes
+                        ),
+                        OutputFormat::Text => println!(
+                            "Diagnostics: {}\nQueued events: {}\nQueue size: {} / {} bytes\nAutomatic source collection: off",
+                            if status.enabled { "enabled" } else { "disabled" },
+                            status.queued_events,
+                            status.queued_bytes,
+                            status.queue_limit_bytes
+                        ),
+                    }
+                }
+                TelemetryCommand::Flush => {
+                    let uploaded = findex_core::telemetry::flush(&cli.db_path, &settings).await?;
+                    match format {
+                        OutputFormat::Json => {
+                            print_json(serde_json::json!({ "uploaded": uploaded }))?
+                        }
+                        OutputFormat::Compact => println!("uploaded={uploaded}"),
+                        OutputFormat::Text => println!("Uploaded {uploaded} diagnostic event(s)."),
+                    }
+                }
+            }
+        }
     }
 
+    Ok(())
+}
+
+fn print_auth_profile(
+    format: OutputFormat,
+    profile: Option<&findex_core::auth::UserProfile>,
+) -> anyhow::Result<()> {
+    match (format, profile) {
+        (OutputFormat::Json, profile) => print_json(serde_json::json!({
+            "authenticated": profile.is_some(),
+            "profile": profile
+        }))?,
+        (OutputFormat::Compact, Some(profile)) => println!(
+            "authenticated=true\tuid={}\temail={}\tname={}",
+            profile.uid, profile.email, profile.display_name
+        ),
+        (OutputFormat::Compact, None) => println!("authenticated=false"),
+        (OutputFormat::Text, Some(profile)) => {
+            println!("Signed in as {} <{}>", profile.display_name, profile.email);
+            println!("Provider: {}", profile.provider);
+        }
+        (OutputFormat::Text, None) => {
+            println!("Not signed in. Run `findex auth login` to connect a profile.");
+        }
+    }
     Ok(())
 }
 

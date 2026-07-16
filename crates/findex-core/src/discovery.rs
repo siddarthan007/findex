@@ -13,6 +13,8 @@ pub enum DiscoveryError {
     Io(#[from] std::io::Error),
     #[error("Ignore error: {0}")]
     Ignore(#[from] ignore::Error),
+    #[error(transparent)]
+    Cancelled(#[from] crate::cancellation::Cancelled),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,6 +47,7 @@ pub fn discover_files<P: AsRef<Path>>(root_dir: P) -> Result<Vec<DiscoveredFile>
     let mut paths = Vec::new();
 
     for entry in walker {
+        crate::cancellation::checkpoint()?;
         let entry = entry.map_err(DiscoveryError::Ignore)?;
         let path = entry.path();
         if path.is_file() {
@@ -57,9 +60,11 @@ pub fn discover_files<P: AsRef<Path>>(root_dir: P) -> Result<Vec<DiscoveredFile>
     }
 
     // Parallel processing with Rayon: read files (using memmap2) and compute Blake3 hashes
+    let cancellation = crate::cancellation::inherited_token();
     let discovered_files: Vec<Result<DiscoveredFile, DiscoveryError>> = paths
         .into_par_iter()
         .map(|path| {
+            crate::cancellation::checkpoint_token(cancellation.as_ref())?;
             let file = File::open(&path)?;
             let metadata = file.metadata()?;
             let size = metadata.len();
@@ -82,6 +87,7 @@ pub fn discover_files<P: AsRef<Path>>(root_dir: P) -> Result<Vec<DiscoveredFile>
     // Collect results and propagate errors
     let mut results = Vec::new();
     for res in discovered_files {
+        crate::cancellation::checkpoint()?;
         results.push(res?);
     }
 

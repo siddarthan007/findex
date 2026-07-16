@@ -33,7 +33,7 @@ export interface Stats {
   edges: number;
   vectors: number;
   merkle_root?: string;
-  stack_graphs?: { resolved_edges: number; timed_out: boolean; message: string };
+  stack_graphs?: { resolved_edges: number; timed_out: boolean; message: string; published_rule_files?: number; bundled_rule_files?: number };
 }
 
 export interface SymbolRecord {
@@ -151,6 +151,13 @@ export interface FindexSettings {
     gpu_memory_limit_mib: number;
     model_idle_seconds: number;
   };
+  telemetry: {
+    enabled: boolean;
+    crash_reports: boolean;
+    include_hardware: boolean;
+    include_project_metrics: boolean;
+    include_source_samples: boolean;
+  };
   ui: {
     theme: ThemePreference;
     motion: boolean;
@@ -164,7 +171,23 @@ export interface FindexSettings {
 
 export interface DeepLinkPayload {
   url: string;
-  route: 'search' | 'open' | 'symbol' | 'graph' | 'settings';
+  route: 'search' | 'open' | 'symbol' | 'graph' | 'settings' | 'auth';
+}
+
+export interface UserProfile {
+  uid: string;
+  email: string;
+  display_name: string;
+  photo_url?: string;
+  signed_in_at: string;
+}
+
+export interface TelemetryStatus {
+  enabled: boolean;
+  queued_events: number;
+  queued_bytes: number;
+  queue_limit_bytes: number;
+  source_collection_active: boolean;
 }
 
 export interface ModelStatus {

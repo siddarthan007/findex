@@ -56,6 +56,11 @@ minisign-verify = { workspace = true }
 base64 = { workspace = true }
 zip = { workspace = true }
 self-replace = { workspace = true }
+directories = { workspace = true }
+keyring = { workspace = true }
+url = { workspace = true }
+webbrowser = { workspace = true }
+zstd = { workspace = true }
 tempfile = { workspace = true }
 stack-graphs = { workspace = true, optional = true }
 tree-sitter-stack-graphs-python = { workspace = true, optional = true }

@@ -2,12 +2,15 @@ import { FormEvent, lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   Activity, ArrowDownToLine, Braces, Boxes, Check, Cpu, Database, Download, FileCode2, GitBranch,
-  Moon, Network, RotateCcw, Search, Settings2, ShieldCheck, SquareTerminal, Sun, Workflow, X
+  CircleUserRound, LogIn, LogOut, Moon, Network, RotateCcw, Search, Send, Settings2, ShieldCheck,
+  SquareTerminal, Sun, Workflow, X
 } from 'lucide-react';
 import { api } from './api';
+import ActivityGlyph from './ActivityGlyph';
+import SyntaxBlock from './SyntaxBlock';
 import type {
   ArchitectureOverview, AstNode, AstOutline, DeepLinkPayload, DesktopUpdateInfo, FindexSettings, GraphNode, GraphSnapshot, ImpactReport,
-  ModelStatus, RuntimeProfile, SearchResult, SourcePreview, Stats, ThemePreference
+  ModelStatus, RuntimeProfile, SearchResult, SourcePreview, Stats, TelemetryStatus, ThemePreference, UserProfile
 } from './types';
 
 type View = 'graph' | 'architecture' | 'search' | 'ast' | 'query' | 'runtime' | 'settings';
@@ -23,6 +26,8 @@ function App() {
   const [runtime, setRuntime] = useState<RuntimeProfile | null>(null);
   const [architecture, setArchitecture] = useState<ArchitectureOverview | null>(null);
   const [settings, setSettings] = useState<FindexSettings | null>(null);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [telemetry, setTelemetry] = useState<TelemetryStatus | null>(null);
   const [systemDark, setSystemDark] = useState(() => window.matchMedia('(prefers-color-scheme: dark)').matches);
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [impact, setImpact] = useState<ImpactReport | null>(null);
@@ -40,11 +45,13 @@ function App() {
   const [installingUpdate, setInstallingUpdate] = useState(false);
 
   useEffect(() => {
-    Promise.all([api.graph(), api.stats(), api.settings()])
-      .then(([nextGraph, nextStats, nextSettings]) => {
+    Promise.all([api.graph(), api.stats(), api.settings(), api.authStatus().catch(() => null), api.telemetryStatus().catch(() => null)])
+      .then(([nextGraph, nextStats, nextSettings, nextProfile, nextTelemetry]) => {
         setGraph(nextGraph);
         setStats(nextStats);
         setSettings(nextSettings);
+        setProfile(nextProfile);
+        setTelemetry(nextTelemetry);
         setSelected(nextGraph.nodes[0] ?? null);
       })
       .catch(cause => setError(String(cause)))
@@ -58,8 +65,8 @@ function App() {
     const apply = async (payload: DeepLinkPayload) => {
       if (!active) return;
       const parsed = new URL(payload.url);
-      if (payload.route === 'settings' || payload.route === 'graph') {
-        setView(payload.route);
+      if (payload.route === 'settings' || payload.route === 'graph' || payload.route === 'auth') {
+        setView(payload.route === 'auth' ? 'settings' : payload.route);
         return;
       }
       const rawQuery = payload.route === 'symbol'
@@ -114,11 +121,36 @@ function App() {
     setBusy(true);
     try {
       setSettings(await api.saveSettings(next));
+      setTelemetry(await api.telemetryStatus().catch(() => null));
     } catch (cause) {
       setError(`Settings were not saved: ${String(cause)}`);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function signIn() {
+    setBusy(true);
+    setError('');
+    try { setProfile(await api.login()); }
+    catch (cause) { setError(`Sign-in failed: ${String(cause)}`); }
+    finally { setBusy(false); }
+  }
+
+  async function signOut() {
+    setBusy(true);
+    try { await api.logout(); setProfile(null); }
+    catch (cause) { setError(`Sign-out failed: ${String(cause)}`); }
+    finally { setBusy(false); }
+  }
+
+  async function flushTelemetry() {
+    setBusy(true);
+    try {
+      await api.flushTelemetry();
+      setTelemetry(await api.telemetryStatus());
+    } catch (cause) { setError(`Telemetry upload failed; the local queue was preserved: ${String(cause)}`); }
+    finally { setBusy(false); }
   }
 
   function cycleTheme() {
@@ -193,6 +225,7 @@ function App() {
       id: result.symbol.id, name: result.symbol.name, kind: result.symbol.kind,
       file_path: result.symbol.file_path, degree: 0, category: 'code'
     });
+    void api.source(result.symbol).then(setSource).catch(() => setSource(null));
   }
 
   async function installUpdate() {
@@ -218,6 +251,10 @@ function App() {
         <button className="icon-button" onClick={cycleTheme} title={`Theme: ${settings?.ui.theme ?? 'system'}`} aria-label="Cycle color theme">
           {resolvedTheme === 'dark' ? <Moon size={14} /> : <Sun size={14} />}
         </button>
+        <button className="profile-button" onClick={() => profile ? setView('settings') : void signIn()} title={profile?.email ?? 'Sign in'}>
+          <CircleUserRound size={15} />
+          <span>{profile ? profile.display_name.split(/\s+/)[0] : 'Sign in'}</span>
+        </button>
         <div className="top-metrics">
           <span><Database size={13} />{stats?.files.toLocaleString() ?? '—'} files</span>
           <span><GitBranch size={13} />{stats?.edges.toLocaleString() ?? '—'} edges</span>
@@ -239,7 +276,7 @@ function App() {
       <main className="workspace">
         <section className="content-panel">
           {view === 'graph' && (
-            <Suspense fallback={<Empty title="Loading WebGL topology" detail="The 3D engine is code-split so non-graph views start without this cost." />}>
+            <Suspense fallback={<LoadingState title="Preparing code topology" />}>
               <GraphCanvas graph={graph} selected={selected} onSelect={setSelected} theme={resolvedTheme} settings={settings?.ui} />
             </Suspense>
           )}
@@ -275,7 +312,7 @@ function App() {
 
           {view === 'runtime' && <RuntimeView runtime={runtime} />}
 
-          {view === 'settings' && settings && <SettingsView settings={settings} onSave={saveSettings} busy={busy} />}
+          {view === 'settings' && settings && <SettingsView settings={settings} onSave={saveSettings} busy={busy} profile={profile} telemetry={telemetry} onLogin={signIn} onLogout={signOut} onFlush={flushTelemetry} />}
         </section>
 
         <aside className="inspector-panel">
@@ -286,6 +323,11 @@ function App() {
             <dl className="facts"><div><dt>Degree</dt><dd>{selected.degree}</dd></div><div><dt>Risk</dt><dd className={impact?.god_node ? 'danger' : ''}>{impact ? `${impact.risk_score.toFixed(1)}/100` : '—'}</dd></div><div><dt>Incoming</dt><dd>{impact?.incoming_edges ?? '—'}</dd></div><div><dt>Outgoing</dt><dd>{impact?.outgoing_edges ?? '—'}</dd></div></dl>
             <section className="inspector-section"><h2>Location</h2><p>{selected.file_path}</p></section>
             {source && <section className="inspector-section source-section"><h2>Exact indexed range · L{source.start_line}–{source.end_line}</h2><CodePreview source={source} /></section>}
+            <section className="inspector-section human-report"><h2>Engineering report</h2>
+              <h3>Finding</h3><p>{impact ? `${selected.name} has ${impact.incoming_edges} incoming and ${impact.outgoing_edges} outgoing relationships. ${impact.god_node ? 'Its coupling is high enough to treat edits as elevated risk.' : 'Its coupling is within the normal range for this index.'}` : 'Impact evidence is being resolved from the local graph.'}</p>
+              <h3>Evidence</h3><p>{impact ? `${impact.callers.length} callers, ${impact.callees.length} callees, ${impact.references.length} references, and ${impact.affected_files.length} affected files.` : 'No report is available yet.'}</p>
+              <h3>Next step</h3><p>{impact?.god_node ? 'Review callers and tests before changing this symbol; request a bounded context bundle for the affected paths.' : 'Open the exact source range, then expand one graph hop only if the local contract is insufficient.'}</p>
+            </section>
             <section className="inspector-section"><h2>Affected files</h2>{impact?.affected_files.slice(0, 8).map(path => <p className="path" key={path}>{compactPath(path)}</p>) ?? <p className="muted">Select an indexed node for impact data.</p>}</section>
             <section className="inspector-section"><h2>Retrieval guidance</h2><p className="muted">Inspect impact before editing. Prefer exact AST ranges or a bounded context bundle over whole-file reads.</p></section>
           </> : <Empty title="Nothing selected" detail="Choose a node or search result." />}
@@ -314,7 +356,7 @@ function App() {
 }
 
 function NavButton({ active, label, onClick, children }: { active: boolean; label: string; onClick: () => void; children: React.ReactElement }) {
-  return <button className={active ? 'rail-button active' : 'rail-button'} onClick={onClick} aria-label={label} title={label}>{children}</button>;
+  return <button className={active ? 'rail-button active' : 'rail-button'} onClick={onClick} aria-label={label} title={label}>{children}<span>{label}</span></button>;
 }
 
 function AstRow({ node, depth }: { node: AstNode; depth: number }) {
@@ -358,10 +400,15 @@ function RuntimeView({ runtime }: { runtime: RuntimeProfile | null }) {
   </div>;
 }
 
-function SettingsView({ settings, onSave, busy }: {
+function SettingsView({ settings, onSave, busy, profile, telemetry, onLogin, onLogout, onFlush }: {
   settings: FindexSettings;
   onSave: (settings: FindexSettings) => Promise<void>;
   busy: boolean;
+  profile: UserProfile | null;
+  telemetry: TelemetryStatus | null;
+  onLogin: () => Promise<void>;
+  onLogout: () => Promise<void>;
+  onFlush: () => Promise<void>;
 }) {
   const [draft, setDraft] = useState(settings);
   const [models, setModels] = useState<ModelStatus[]>([]);
@@ -378,6 +425,8 @@ function SettingsView({ settings, onSave, busy }: {
     setDraft(current => ({ ...current, runtime: { ...current.runtime, [key]: value } }));
   const setUi = <K extends keyof FindexSettings['ui']>(key: K, value: FindexSettings['ui'][K]) =>
     setDraft(current => ({ ...current, ui: { ...current.ui, [key]: value } }));
+  const setTelemetrySetting = <K extends keyof FindexSettings['telemetry']>(key: K, value: FindexSettings['telemetry'][K]) =>
+    setDraft(current => ({ ...current, telemetry: { ...current.telemetry, [key]: value } }));
 
   return <div className="scroll-view settings-view">
     <div className="view-heading">
@@ -388,10 +437,31 @@ function SettingsView({ settings, onSave, busy }: {
       </div>
     </div>
     <div className="settings-grid">
+      <SettingsSection title="Account" detail="One profile across desktop, CLI, and TUI. Secrets are kept in the operating-system credential vault.">
+        <div className="account-card">
+          <CircleUserRound size={28} />
+          <span><b>{profile?.display_name ?? 'Local workspace'}</b><small>{profile?.email ?? 'Sign in only when you want profile sync or telemetry upload.'}</small></span>
+          <button disabled={busy} onClick={() => void (profile ? onLogout() : onLogin())}>{profile ? <><LogOut size={13} />Sign out</> : <><LogIn size={13} />Sign in with Google</>}</button>
+        </div>
+        <p className="settings-note">Authentication opens the system browser and returns through a one-time loopback callback. Findex never stores your Google password.</p>
+      </SettingsSection>
+
+      <SettingsSection title="Privacy and diagnostics" detail="Off by default. Each category is independently consented and can be changed at any time.">
+        <Toggle label="Share diagnostics" detail="Master network gate. When off, Findex creates no telemetry queue and makes no telemetry requests." checked={draft.telemetry.enabled} onChange={value => {
+          setDraft(current => ({ ...current, telemetry: value ? { ...current.telemetry, enabled: true } : { enabled: false, crash_reports: false, include_hardware: false, include_project_metrics: false, include_source_samples: false } }));
+        }} />
+        <Toggle disabled={!draft.telemetry.enabled} label="Crash reports" detail="Failure category, app version, and bounded stack metadata." checked={draft.telemetry.crash_reports} onChange={value => setTelemetrySetting('crash_reports', value)} />
+        <Toggle disabled={!draft.telemetry.enabled} label="Coarse hardware" detail="CPU count, RAM bucket, compute device, and CUDA availability. No serial numbers." checked={draft.telemetry.include_hardware} onChange={value => setTelemetrySetting('include_hardware', value)} />
+        <Toggle disabled={!draft.telemetry.enabled} label="Project metrics" detail="Counts of files, symbols, and graph edges. No paths, names, queries, or repository identity." checked={draft.telemetry.include_project_metrics} onChange={value => setTelemetrySetting('include_project_metrics', value)} />
+        <Toggle disabled={!draft.telemetry.enabled} label="Allow source in manual reports" detail="Permission for explicitly attached diagnostics only. Automatic events remain source-free." checked={draft.telemetry.include_source_samples} onChange={value => setTelemetrySetting('include_source_samples', value)} />
+        <div className="telemetry-state"><span><b>{telemetry?.queued_events ?? 0}</b> queued events</span><span>{telemetry ? `${(telemetry.queued_bytes / 1024).toFixed(1)} KiB of ${(telemetry.queue_limit_bytes / 1024 / 1024).toFixed(0)} MiB` : 'Queue unavailable'}</span><button disabled={busy || !profile || !draft.telemetry.enabled || !telemetry?.queued_events} onClick={() => void onFlush()}><Send size={13} />Send now</button></div>
+        <p className="settings-note">Events are zstd-compressed, size-bounded, authenticated, and stored per account. Country and IP are not collected by the client.</p>
+      </SettingsSection>
+
       <SettingsSection title="Indexing" detail="Disable expensive index stages without installing a different build.">
         <Toggle label="Lexical index" detail="Tantivy BM25 and trigram-compatible symbol lookup." checked={draft.indexing.lexical_index} onChange={value => setIndexing('lexical_index', value)} />
         <Toggle label="Semantic index" detail="USearch vectors and ONNX query embedding." checked={draft.indexing.semantic_index} onChange={value => { setIndexing('semantic_index', value); setRetrieval('semantic_search', value); }} />
-        <Toggle label="Exact Stack Graphs" detail="Precise name resolution for supported language packages." checked={draft.indexing.stack_graphs} onChange={value => setIndexing('stack_graphs', value)} />
+        <Toggle label="Stack Graph resolution" detail="Published exact packages where available; bundled lexical rules are reported separately." checked={draft.indexing.stack_graphs} onChange={value => setIndexing('stack_graphs', value)} />
         <Toggle label="Incremental watcher" detail="Debounced partial re-indexing after file changes." checked={draft.indexing.watcher} onChange={value => setIndexing('watcher', value)} />
         <Toggle label="VFS shadowing" detail="Unsaved-buffer overlays and bounded micro-compilation." checked={draft.indexing.vfs_shadowing} onChange={value => setIndexing('vfs_shadowing', value)} />
         <Toggle label="Trace pinning" detail="Persist execution evidence and taint tags on graph edges." checked={draft.indexing.execution_trace_pinning} onChange={value => setIndexing('execution_trace_pinning', value)} />
@@ -453,8 +523,8 @@ function SettingsSection({ title, detail, children }: { title: string; detail: s
   return <section className="settings-section"><header><h2>{title}</h2><p>{detail}</p></header>{children}</section>;
 }
 
-function Toggle({ label, detail, checked, onChange }: { label: string; detail: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return <label className="setting-row"><span><b>{label}</b><small>{detail}</small></span><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} /></label>;
+function Toggle({ label, detail, checked, onChange, disabled = false }: { label: string; detail: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
+  return <label className={disabled ? 'setting-row disabled' : 'setting-row'}><span><b>{label}</b><small>{detail}</small></span><input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} /></label>;
 }
 
 function NumberSetting({ label, value, min, max, step = 1, onChange }: { label: string; value: number; min: number; max: number; step?: number; onChange: (value: number) => void }) {
@@ -473,26 +543,12 @@ function Empty({ title, detail }: { title: string; detail: string }) {
   return <div className="empty"><Boxes size={22} /><b>{title}</b><p>{detail}</p></div>;
 }
 
-function CodePreview({ source }: { source: SourcePreview }) {
-  return <pre className="source-code">{source.text.split('\n').map((line, index) => <code key={index}><span className="line-number">{source.start_line + index}</span>{highlightCodeLine(line)}</code>)}</pre>;
+function LoadingState({ title }: { title: string }) {
+  return <div className="loading-state"><ActivityGlyph label={title} /></div>;
 }
 
-function highlightCodeLine(line: string) {
-  const pattern = /(\/\/.*$|#.*$|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(?:async|await|class|const|def|enum|fn|function|impl|import|interface|let|match|new|pub|return|struct|trait|type|use|var)\b|\b\d+(?:\.\d+)?\b)/g;
-  const fragments: React.ReactNode[] = [];
-  let cursor = 0;
-  for (const match of line.matchAll(pattern)) {
-    const index = match.index ?? 0;
-    if (index > cursor) fragments.push(line.slice(cursor, index));
-    const token = match[0];
-    const className = token.startsWith('//') || token.startsWith('#') ? 'syntax-comment'
-      : /^["'`]/.test(token) ? 'syntax-string'
-        : /^\d/.test(token) ? 'syntax-number' : 'syntax-keyword';
-    fragments.push(<span className={className} key={`${index}-${token}`}>{token}</span>);
-    cursor = index + token.length;
-  }
-  if (cursor < line.length) fragments.push(line.slice(cursor));
-  return fragments;
+function CodePreview({ source }: { source: SourcePreview }) {
+  return <SyntaxBlock source={source.text} path={source.path} startLine={source.start_line} />;
 }
 
 function PointerCompanion({ enabled }: { enabled: boolean }) {

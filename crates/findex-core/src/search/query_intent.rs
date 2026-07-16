@@ -174,6 +174,13 @@ fn canonicalize_terms(terms: &[String]) -> Vec<String> {
             "cache" | "cached" | "memoize" | "lru" | "redis" => "cache",
             "ui" | "component" | "view" | "widget" | "frontend" => "ui",
             "service" | "manager" | "provider" => "service",
+            "array" | "list" | "slice" | "vec" | "vector" => "sequence",
+            "map" | "hashmap" | "dictionary" | "dict" | "table" => "map",
+            "queue" | "deque" | "channel" => "queue",
+            "tree" | "trie" | "ast" | "syntax" => "tree",
+            "graph" | "dag" | "adjacency" | "edge" | "node" => "graph",
+            "lock" | "mutex" | "semaphore" | "atomic" | "synchronization" => "sync",
+            "error" | "exception" | "failure" | "result" => "error",
             _ => term,
         })
         .map(str::to_string)
@@ -211,12 +218,14 @@ fn relation_for(term: &str) -> Option<EdgeType> {
         "import" | "imports" | "include" | "includes" | "require" | "requires" => {
             Some(EdgeType::Imports)
         }
+        "depend" | "depends" | "dependency" | "dependencies" => Some(EdgeType::Imports),
         "inherit" | "inherits" | "extend" | "extends" | "implement" | "implements" => {
             Some(EdgeType::Inherits)
         }
         "contain" | "contains" | "inside" | "within" => Some(EdgeType::Contains),
         "define" | "defines" | "declares" => Some(EdgeType::Defines),
-        "reference" | "references" | "reads" | "writes" => Some(EdgeType::References),
+        "reference" | "references" | "reads" | "writes" | "publishes" | "subscribes" | "emits"
+        | "consumes" => Some(EdgeType::References),
         _ => None,
     }
 }
@@ -244,6 +253,23 @@ fn synonyms(term: &str) -> &'static [&'static str] {
             &["ui", "component", "view", "widget", "frontend"]
         }
         "service" => &["service", "manager", "provider", "client"],
+        "array" | "list" | "slice" | "vec" | "vector" | "sequence" => {
+            &["array", "list", "slice", "vec", "vector", "sequence"]
+        }
+        "map" | "hashmap" | "dictionary" | "dict" | "table" => {
+            &["map", "hashmap", "dictionary", "dict", "table", "lookup"]
+        }
+        "queue" | "deque" | "channel" => &["queue", "deque", "channel", "buffer"],
+        "tree" | "trie" | "ast" | "syntax" => &["tree", "trie", "ast", "syntax", "node"],
+        "graph" | "dag" | "adjacency" | "edge" | "node" => {
+            &["graph", "dag", "adjacency", "edge", "node", "topology"]
+        }
+        "lock" | "mutex" | "semaphore" | "atomic" | "synchronization" => {
+            &["lock", "mutex", "semaphore", "atomic", "synchronization"]
+        }
+        "error" | "exception" | "failure" | "result" => {
+            &["error", "exception", "failure", "result", "retry"]
+        }
         _ => &[],
     }
 }

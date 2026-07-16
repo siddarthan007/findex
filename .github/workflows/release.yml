@@ -37,6 +37,7 @@ jobs:
           grep -q "^version = \"$version\"" crates/findex-core/Cargo.toml
           grep -q "^version = \"$version\"" crates/findex-cli/Cargo.toml
           grep -q "^version = \"$version\"" crates/findex-tauri/Cargo.toml
+          node -e "const fs=require('fs'); const v=process.argv[1]; for (const file of ['crates/findex-tauri/package.json','crates/findex-tauri/tauri.conf.json']) { const actual=JSON.parse(fs.readFileSync(file)).version; if (actual!==v) throw new Error(file+' version '+actual+' != '+v); }" "$version"
 
   cli:
     needs: release-guard
