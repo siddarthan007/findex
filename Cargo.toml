@@ -34,7 +34,7 @@ tree-sitter-swift = "=0.7.0"
 # Stack Graphs integration for precise name resolution. The dependencies are
 # optional at the crate level but enabled by findex-core's production defaults.
 tree-sitter-stack-graphs = "0.10"
-oxc_allocator = "0.13"
+oxc_allocator = "0.140"
 oxc_parser = "0.13"
 oxc_span = "0.13"
 oxc_ast = "0.13"
